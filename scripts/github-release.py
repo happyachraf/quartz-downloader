@@ -61,6 +61,8 @@ def main():
     if not repo or repo['private']:raise RuntimeError('Create the public repository first')
     if not args.version or not re.fullmatch(r'\d+\.\d+\.\d+',args.version):raise RuntimeError('A stable version is required')
     tag='v'+args.version;release=api(base+'/releases/tags/'+tag)
+    # GitHub's by-tag endpoint can omit a draft; authenticated listing includes it.
+    if not release:release=next((r for r in (api(base+'/releases?per_page=100') or []) if r['tag_name']==tag),None)
     if args.mode=='draft':
         if not args.notes or not args.commit:raise RuntimeError('--notes and --commit are required')
         if not release:release=api(base+'/releases','POST',{'tag_name':tag,'target_commitish':args.commit,'name':'Quartz Downloader '+args.version,'body':args.notes.read_text(encoding='utf-8'),'draft':True,'prerelease':False})
