@@ -6,16 +6,24 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 object SpotifyMatcher {
-    fun find(track: JSONObject, processId: String): JSONArray {
+    fun find(track: JSONObject, processId: String, context: android.content.Context? = null, allowed: () -> Boolean = { true }): JSONArray {
+        if (!allowed() || Thread.currentThread().isInterrupted) throw InterruptedException()
+        context?.let { SpotifyMatchCache.get(it, track)?.let { hit -> return hit } }
         val artists = track.getJSONArray("artists")
         val artist = artists.optString(0)
         val query = "$artist ${track.getString("name")} audio"
         val initial = search(track, query, processId)
-        if (initial.optJSONObject(0)?.optDouble("score", 0.0)?.let { it >= .82 } == true) return initial
+        if (initial.optJSONObject(0)?.optDouble("score", 0.0)?.let { it >= .82 } == true) {
+            if (allowed()) context?.let { SpotifyMatchCache.save(it, track, initial) }
+            return initial
+        }
+        if (!allowed() || Thread.currentThread().isInterrupted) throw InterruptedException()
         val artistNames = (0 until artists.length()).joinToString(" ") { artists.optString(it) }
         val extra = search(track, "$artistNames ${track.getString("name")}", processId)
         val combined = (0 until initial.length()).map { initial.getJSONObject(it) } + (0 until extra.length()).map { extra.getJSONObject(it) }
-        return JSONArray(combined.distinctBy { it.getString("id") }.sortedByDescending { it.optDouble("score") }.take(3))
+        val result = JSONArray(combined.distinctBy { it.getString("id") }.sortedByDescending { it.optDouble("score") }.take(3))
+        if (allowed()) context?.let { SpotifyMatchCache.save(it, track, result) }
+        return result
     }
 
     private fun search(track: JSONObject, query: String, processId: String): JSONArray {

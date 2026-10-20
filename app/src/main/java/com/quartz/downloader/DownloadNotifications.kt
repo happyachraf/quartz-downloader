@@ -14,6 +14,7 @@ object DownloadNotifications {
     const val ACTIVE_ID = 1042
     const val PROGRESS = "quartz_progress_v2"
     private const val RESULTS = "quartz_results_v2"
+    private const val GROUP = "quartz_downloads"
     private fun manager(context: Context) = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
     fun channels(context: Context) {
@@ -68,6 +69,7 @@ object DownloadNotifications {
             else -> "Preparing download…"
         }
         val builder = base(context, PROGRESS, job).setContentText(message)
+            .setGroup(GROUP)
             .setContentTitle(job.optString("title","Quartz Downloader")+if(state=="downloading") " · Downloading" else "")
             .setSubText(if (waiting > 0) "$waiting waiting" else "Quartz Downloader")
             .setCategory(Notification.CATEGORY_PROGRESS).setOnlyAlertOnce(true).setOngoing(true)
@@ -81,8 +83,38 @@ object DownloadNotifications {
 
     fun update(context: Context, job: JSONObject, waiting: Int) = manager(context).notify(ACTIVE_ID, progress(context, job, waiting))
 
+    fun summary(context: Context, running: Int, waiting: Int): Notification {
+        val pause = PendingIntent.getService(context, 0,
+            Intent(context, DownloadService::class.java).setAction(DownloadService.ACTION_PAUSE_ALL)
+                .setData(android.net.Uri.parse("quartz://pause-all")),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val builder = base(context, PROGRESS, JSONObject().put("title", "Quartz Downloader"))
+            .setContentTitle(if (running > 0) "$running download${if (running == 1) "" else "s"} running" else "Downloads waiting")
+            .setContentText(if (waiting > 0) "$waiting queued · progress saved" else "Downloads continue in the background")
+            .setGroup(GROUP).setGroupSummary(true).setOnlyAlertOnce(true).setOngoing(true)
+            .setCategory(Notification.CATEGORY_PROGRESS)
+            .addAction(Notification.Action.Builder(null, "Pause all", pause).build())
+        if (Build.VERSION.SDK_INT >= 31) builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
+        return builder.build()
+    }
+
+    fun updateAll(context: Context, jobs: List<JSONObject>, waiting: Int) {
+        val nm = manager(context)
+        val ids = jobs.map { it.optString("id") }.toSet()
+        for (old in nm.activeNotifications) if (old.id == 2 && old.tag !in ids && old.notification.group == GROUP) nm.cancel(old.tag, 2)
+        nm.notify(ACTIVE_ID, summary(context, jobs.size, waiting))
+        for (job in jobs) nm.notify(job.getString("id"), 2, progress(context, job, waiting))
+    }
+
+    fun clearProgress(context: Context, id: String) = manager(context).cancel(id, 2)
+    fun clearAllProgress(context: Context) {
+        val nm = manager(context)
+        for (old in nm.activeNotifications) if (old.id == 2 && old.notification.group == GROUP) nm.cancel(old.tag, 2)
+    }
+
     fun result(context: Context, job: JSONObject) {
         val id = job.optString("id")
+        clearProgress(context, id)
         val complete = job.optString("state") == "complete"
         val cancelled = job.optString("state") == "cancelled"
         val paused = job.optString("state") == "paused"

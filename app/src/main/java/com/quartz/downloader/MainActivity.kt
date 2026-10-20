@@ -141,6 +141,7 @@ open class MainActivity : Activity() {
     }
 
     inner class Bridge {
+        @JavascriptInterface fun playerState(): String = PlaybackService.state().toString()
         @JavascriptInterface fun state(): String {
             val preferences = getSharedPreferences("quartz_ui", MODE_PRIVATE)
             return JSONObject()
@@ -148,6 +149,7 @@ open class MainActivity : Activity() {
                 .put("theme", preferences.getString("theme", "dark"))
                 .put("defaultMode", preferences.getString("defaultMode", "video"))
                 .put("askQuality", preferences.getBoolean("askQuality", false))
+                .put("parallelDownloads", preferences.getInt("parallelDownloads", 2).coerceIn(1, 3))
                 .put("spotifyAudioFormat", preferences.getString("spotifyAudioFormat", "original"))
                 .put("videoAudioFormat", preferences.getString("videoAudioFormat", "original"))
                 .put("sessions", BrowserCookies.status())
@@ -435,11 +437,13 @@ open class MainActivity : Activity() {
             when {
                 name == "defaultMode" && value in listOf("video", "audio") -> editor.putString(name, value)
                 name == "askQuality" && value in listOf("true", "false") -> editor.putBoolean(name, value == "true")
+                name == "parallelDownloads" && value in listOf("1", "2", "3") -> editor.putInt(name, value.toInt())
                 name == "spotifyAudioFormat" && value in listOf("original", "mp3") -> editor.putString(name, value)
                 name == "videoAudioFormat" && value in listOf("original", "mp3") -> editor.putString(name, value)
                 else -> return
             }
             editor.apply()
+            if (name == "parallelDownloads" && DownloadService.active) startForegroundService(Intent(this@MainActivity, DownloadService::class.java))
         }
 
         @JavascriptInterface fun paste(): String {

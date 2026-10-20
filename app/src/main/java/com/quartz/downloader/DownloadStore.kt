@@ -9,15 +9,17 @@ import org.json.JSONObject
 object DownloadStore {
     private const val PREFS = "quartz_downloads"
     private const val KEY = "jobs"
+    private var cachedText: String? = null
+    private var cachedRows = JSONArray()
 
     @Synchronized fun all(context: Context): JSONArray {
         refreshDirect(context)
-        return read(context)
+        return JSONArray(read(context).toString())
     }
 
     @Synchronized fun get(context: Context, id: String): JSONObject? {
         val rows = read(context)
-        for (i in 0 until rows.length()) if (rows.getJSONObject(i).optString("id") == id) return rows.getJSONObject(i)
+        for (i in 0 until rows.length()) if (rows.getJSONObject(i).optString("id") == id) return JSONObject(rows.getJSONObject(i).toString())
         return null
     }
 
@@ -27,7 +29,7 @@ object DownloadStore {
 
     @Synchronized fun addAll(context: Context, jobs: List<JSONObject>) {
         val rows = read(context)
-        val next = JSONArray(jobs)
+        val next = JSONArray(JSONArray(jobs).toString())
         var keptFinished = 0
         for (i in 0 until rows.length()) {
             val row = rows.getJSONObject(i)
@@ -47,7 +49,7 @@ object DownloadStore {
             if (row.optString("state") in listOf("paused", "cancelled") && nextState in listOf("preparing", "downloading", "processing", "saving", "waiting", "complete", "failed")) return
             if (row.optString("state") == "complete" && nextState in listOf("paused", "cancelled")) return
             for (key in changes.keys()) row.put(key, changes.get(key))
-            write(context, rows)
+            write(context, rows, nextState == "downloading" || nextState == "processing")
             return
         }
     }
@@ -85,11 +87,18 @@ object DownloadStore {
 
     private fun read(context: Context): JSONArray {
         val text = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, "[]") ?: "[]"
-        return try { JSONArray(text) } catch (_: Exception) { JSONArray() }
+        if (text != cachedText) {
+            cachedRows = try { JSONArray(text) } catch (_: Exception) { JSONArray() }
+            cachedText = text
+        }
+        return cachedRows
     }
 
-    private fun write(context: Context, rows: JSONArray) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, rows.toString()).commit()
+    private fun write(context: Context, rows: JSONArray, progressOnly: Boolean = false) {
+        val text = rows.toString()
+        cachedRows = rows; cachedText = text
+        val editor = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, text)
+        if (progressOnly) editor.apply() else editor.commit()
     }
 
     private fun refreshDirect(context: Context) {

@@ -16,8 +16,8 @@ Get the signed APK from [the latest release](https://github.com/happyachraf/quar
 - Share a supported video link to Quartz and choose an available video or audio format.
 - Built-in website browser and local website sign-in sessions for X, Facebook and Instagram.
 - Facebook shares load through that saved browser session first and read the embedded video's stream data, including shared posts and separate HD video/audio streams. Formats are offered without a manual browser visit. Facebook can still require sign-in or decline access to a post.
-- Download queue, foreground progress notifications, Pause/Resume and retained compatible partial downloads.
-- Public Spotify playlist metadata, reviewed YouTube matches, independent saved playlist workspaces and audio downloads from selected matches.
+- Download queue with 1, 2 or 3 simultaneous downloads (2 by default), individual foreground notifications, Pause/Resume and retained compatible partial downloads.
+- Public Spotify playlist metadata, two concurrent YouTube match searches, reusable seven-day search results across playlists, independent saved workspaces and audio downloads from reviewed matches.
 - Original source audio or 320 kbps MP3, with artwork and music tags when available.
 - Music library, player, playlist groups, long-press selection, Select all and bulk removal.
 - GitHub-only app-update checks, checksum and original-signer validation, and Android installation confirmation.

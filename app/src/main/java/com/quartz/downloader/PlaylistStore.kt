@@ -5,9 +5,20 @@ import org.json.JSONObject
 import java.io.File
 
 object PlaylistStore {
+    private var cachedPath = ""
+    private var cachedStamp = -1L
+    private var cachedSize = -1L
+    private var cachedLibrary: JSONObject? = null
     private fun read(context: Context): JSONObject {
         val file = File(context.filesDir, "spotify-library.json")
-        if (file.exists()) return JSONObject(file.readText())
+        if (file.exists()) {
+            if (cachedPath != file.absolutePath || cachedStamp != file.lastModified() || cachedSize != file.length() || cachedLibrary == null) {
+                cachedLibrary = JSONObject(file.readText()); cachedPath = file.absolutePath
+                cachedStamp = file.lastModified(); cachedSize = file.length()
+            }
+            return cachedLibrary!!
+        }
+        cachedLibrary = null
         val old = File(context.filesDir, "spotify-playlist.json")
         val library = JSONObject().put("active", "").put("playlists", JSONObject())
         if (old.exists()) {
@@ -21,17 +32,19 @@ object PlaylistStore {
         val temp = File(context.filesDir, "spotify-library.tmp")
         java.io.FileOutputStream(temp).use { it.write(library.toString().toByteArray(Charsets.UTF_8)); it.fd.sync() }
         check(temp.renameTo(File(context.filesDir, "spotify-library.json"))) { "Could not save playlist progress." }
+        val file = File(context.filesDir, "spotify-library.json")
+        cachedLibrary = library; cachedPath = file.absolutePath; cachedStamp = file.lastModified(); cachedSize = file.length()
     }
     @Synchronized fun get(context: Context): JSONObject {
         val library = read(context)
-        return library.getJSONObject("playlists").optJSONObject(library.optString("active")) ?: JSONObject().put("status", "empty")
+        return JSONObject((library.getJSONObject("playlists").optJSONObject(library.optString("active")) ?: JSONObject().put("status", "empty")).toString())
     }
-    @Synchronized fun getFor(context: Context, url: String): JSONObject? = read(context).getJSONObject("playlists").optJSONObject(url)
+    @Synchronized fun getFor(context: Context, url: String): JSONObject? = read(context).getJSONObject("playlists").optJSONObject(url)?.let { JSONObject(it.toString()) }
     @Synchronized fun all(context: Context): List<JSONObject> {
         val rows = read(context).getJSONObject("playlists")
-        return rows.keys().asSequence().map { rows.getJSONObject(it) }.toList()
+        return rows.keys().asSequence().map { JSONObject(rows.getJSONObject(it).toString()) }.toList()
     }
-    @Synchronized fun summaries(context: Context): org.json.JSONArray = org.json.JSONArray(all(context).filter { !it.optBoolean("historyHidden") }.map { row ->
+    @Synchronized fun summaries(context: Context): org.json.JSONArray = org.json.JSONArray(read(context).getJSONObject("playlists").let { rows -> rows.keys().asSequence().map { rows.getJSONObject(it) }.toList() }.filter { !it.optBoolean("historyHidden") }.map { row ->
         val tracks = row.optJSONArray("tracks") ?: org.json.JSONArray()
         JSONObject().put("url", row.optString("url")).put("title", row.optString("title", "Loading playlist…"))
             .put("cover", row.optString("cover")).put("status", row.optString("status"))
@@ -60,7 +73,7 @@ object PlaylistStore {
         val url = state.optString("url", library.optString("active"))
         if (url.isBlank()) return
         state.put("url", url)
-        library.getJSONObject("playlists").put(url, state)
+        library.getJSONObject("playlists").put(url, JSONObject(state.toString()))
         library.put("active", url)
         write(context, library)
     }
@@ -70,7 +83,7 @@ object PlaylistStore {
         val state = library.getJSONObject("playlists").optJSONObject(url) ?: JSONObject().put("url", url)
         change(state)
         if (url.isNotBlank()) { library.getJSONObject("playlists").put(url, state); write(context, library) }
-        return state
+        return JSONObject(state.toString())
     }
     fun recover(context: Context) { /* Workers own recovery, never the screen. */ }
 }

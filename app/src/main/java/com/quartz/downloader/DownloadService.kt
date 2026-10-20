@@ -27,17 +27,17 @@ class DownloadService : Service() {
         val RUNNING = listOf("queued", "preparing", "downloading", "processing", "saving", "waiting")
         @Volatile var active = false; private set
     }
-    private val worker = Executors.newSingleThreadExecutor()
+    private val worker = Executors.newFixedThreadPool(3)
     private val main = Handler(Looper.getMainLooper())
-    @Volatile private var currentId = ""
-    private var busy = false
+    private val activeIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private var destroyed = false
     private var lastNotificationUpdate = 0L
     private lateinit var wake: android.os.PowerManager.WakeLock
     private val cancelled = mutableSetOf<String>()
     private val later = Runnable { pump() }
     private val publishProgress = Runnable {
-        DownloadStore.get(this, currentId)?.let { DownloadNotifications.update(this, it, waiting()) }
+        val jobs = rows()
+        DownloadNotifications.updateAll(this, jobs.filter { it.optString("id") in activeIds && it.optString("state") in RUNNING }, waiting())
         lastNotificationUpdate = SystemClock.elapsedRealtime()
     }
     override fun onBind(intent: Intent?): IBinder? = null
@@ -62,13 +62,13 @@ class DownloadService : Service() {
             when (action) {
                 ACTION_CANCEL, ACTION_PAUSE, ACTION_PAUSE_ALL -> if (job.optString("state") in RUNNING || job.optString("state") == "paused") {
                     synchronized(cancelled) {
-                        if (jobId == currentId) cancelled.add(jobId)
+                        if (jobId in activeIds) cancelled.add(jobId)
                         DownloadStore.update(this, jobId, JSONObject().put("state", if (action == ACTION_CANCEL) "cancelled" else "paused")
                             .put("message", if (action == ACTION_CANCEL) "Cancelled" else "Paused. Progress saved. Tap Resume to continue."))
                     }
-                    if (jobId == currentId) { YoutubeDL.destroyProcessById(jobId); AudioArtwork.cancel(jobId) }
+                    if (jobId in activeIds) { YoutubeDL.destroyProcessById(jobId); AudioArtwork.cancel(jobId) }
                     DownloadStore.get(this, jobId)?.let { DownloadNotifications.result(this, it) }
-                    if (action == ACTION_CANCEL && jobId != currentId) File(filesDir, "working/$jobId").deleteRecursively()
+                    if (action == ACTION_CANCEL && jobId !in activeIds) File(filesDir, "working/$jobId").deleteRecursively()
                 }
                 ACTION_RESUME, ACTION_RESUME_ALL -> if (job.optString("state") in (if (action == ACTION_RESUME_ALL) listOf("paused") else listOf("paused", "waiting", "failed", "cancelled"))) {
                     DownloadStore.update(this, jobId, JSONObject().put("state", "queued").put("retryAt", 0).put("attempts", 0).put("message", "Waiting to resume…"))
@@ -77,27 +77,31 @@ class DownloadService : Service() {
             }
         }
         // startForeground must run even when a notification action starts an idle service.
-        val visible = DownloadStore.get(this, currentId) ?: rows().firstOrNull { it.optString("state") in RUNNING || it.optString("state") == "paused" } ?: JSONObject().put("title", "Quartz Downloader")
-        startForeground(DownloadNotifications.ACTIVE_ID, DownloadNotifications.progress(this, visible, waiting()), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        startForeground(DownloadNotifications.ACTIVE_ID, DownloadNotifications.summary(this, activeIds.size, waiting()), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         pump()
         return START_STICKY
     }
     private fun pump() {
-        if (busy || destroyed) return
+        if (destroyed) return
         main.removeCallbacks(later)
         val pending = rows().filter { it.optString("state") in RUNNING }
-        val next = pending.firstOrNull { it.optLong("retryAt") <= System.currentTimeMillis() }
-        if (next == null) {
-            if (pending.isNotEmpty()) {
-                currentId = pending.first().getString("id"); refreshProgress(); main.postDelayed(later, 15000); return
+        val limit = getSharedPreferences("quartz_ui", MODE_PRIVATE).getInt("parallelDownloads", 2).coerceIn(1, 3)
+        for (next in pending) {
+            if (activeIds.size >= limit) break
+            val id = next.getString("id")
+            if (id in activeIds || next.optLong("retryAt") > System.currentTimeMillis()) continue
+            activeIds.add(id)
+            worker.execute {
+                try { download(id) }
+                finally { main.post { activeIds.remove(id); DownloadNotifications.clearProgress(this, id); pump() } }
             }
-            currentId = ""; main.removeCallbacks(publishProgress); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); return
         }
-        busy = true; currentId = next.getString("id"); val id = currentId
-        worker.execute {
-            try { download(id) }
-            finally { main.post { busy = false; currentId = ""; pump() } }
+        if (activeIds.isEmpty() && pending.isEmpty()) {
+            main.removeCallbacks(publishProgress); DownloadNotifications.clearAllProgress(this)
+            stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); return
         }
+        refreshProgress()
+        if (pending.any { it.optString("id") !in activeIds }) main.postDelayed(later, 15000)
     }
 
     private fun download(id: String) {
@@ -110,7 +114,6 @@ class DownloadService : Service() {
         var cookies: File? = null
         try {
             if (synchronized(cancelled) { id in cancelled } || job.optString("state") !in RUNNING) return
-            currentId = id
             if (mode == "audio") DownloadStore.update(this, id, JSONObject().put("audioFormat", audioFormat).put("audioQuality", if (audioFormat == "mp3") 320 else 0))
             DownloadStore.update(this, id, JSONObject().put("state", "preparing").put("message", if (UrlPolicy.isFacebook(url)) "Opening Facebook with your saved session…" else "Preparing media tools…"))
             refreshProgress()
@@ -246,7 +249,7 @@ class DownloadService : Service() {
         }
     }
 
-    private fun waiting(): Int = rows().count { it.optString("id") != currentId && it.optString("state") in RUNNING }
+    private fun waiting(): Int = rows().count { it.optString("id") !in activeIds && it.optString("state") in RUNNING }
     private fun refreshProgress() {
         main.post {
             main.removeCallbacks(publishProgress)
@@ -265,8 +268,9 @@ class DownloadService : Service() {
     }
     override fun onDestroy() {
         destroyed = true; active = false; main.removeCallbacksAndMessages(null)
-        synchronized(cancelled) { if (currentId.isNotBlank()) cancelled.add(currentId) }
-        if (currentId.isNotBlank()) { YoutubeDL.destroyProcessById(currentId); AudioArtwork.cancel(currentId) }
+        synchronized(cancelled) { cancelled.addAll(activeIds) }
+        for (id in activeIds) { YoutubeDL.destroyProcessById(id); AudioArtwork.cancel(id) }
+        DownloadNotifications.clearAllProgress(this)
         worker.shutdownNow()
         if (::wake.isInitialized && wake.isHeld) wake.release()
         super.onDestroy()

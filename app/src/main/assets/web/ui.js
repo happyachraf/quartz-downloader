@@ -140,6 +140,7 @@ function showSettings(show) {
   if (show) refresh();
 }
 function updateSettings(state) {
+  $('parallel-downloads').value = String(state.parallelDownloads || 2);
   document.body.classList.toggle('share-only', !!state.shareOnly);
   document.documentElement.classList.toggle('share-only', !!state.shareOnly);
   $('audio-format').value = state.videoAudioFormat || 'original';
@@ -257,4 +258,6 @@ $('download').onclick = () => {
 $('notification-enable').onclick = () => native('notificationSettings');
 $('audio-format').onchange = () => native('setting', 'videoAudioFormat', $('audio-format').value);
 refresh();
-setInterval(refresh, 1500);
+$('parallel-downloads').onchange = () => { native('setting', 'parallelDownloads', $('parallel-downloads').value); refresh(); };
+setInterval(() => { if (!document.hidden) refresh(); }, 1500);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });

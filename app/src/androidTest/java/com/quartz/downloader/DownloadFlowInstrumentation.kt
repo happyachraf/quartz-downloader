@@ -30,6 +30,8 @@ class DownloadFlowInstrumentation : Instrumentation() {
         evidence = File(targetContext.getExternalFilesDir(null), "tests-030").apply { mkdirs() }
         try {
             when (phase) {
+                "parallel-downloads" -> parallelDownloads()
+                "fast-matching" -> fastMatching()
                 "facebook-session" -> facebookSession()
                 "facebook-media" -> facebookMedia()
                 "spotify-history" -> spotifyHistory()
@@ -66,6 +68,162 @@ class DownloadFlowInstrumentation : Instrumentation() {
         }
     }
     private fun check(name: String, condition: Boolean) { if (!condition) error(name); checks.put(name) }
+    private fun parallelDownloads() {
+        launch("", false)
+        check("Existing background work is idle before isolated test", !DownloadService.active && !SpotifyService.active)
+        val prefs = targetContext.getSharedPreferences("quartz_ui", 0)
+        val oldLimit = prefs.getInt("parallelDownloads", 2)
+        val history = DownloadStore.all(targetContext).toString()
+        val ids = (1..3).map { java.util.UUID.randomUUID().toString() }
+        val keys = mutableListOf<String>()
+        fun row(index: Int) = DownloadStore.get(targetContext, ids[index])!!
+        fun command(action: String? = null, id: String = "") {
+            runOnMainSync { targetContext.startForegroundService(Intent(targetContext, DownloadService::class.java).setAction(action).putExtra(DownloadService.EXTRA_ID, id)) }
+        }
+        fun count(state: String) = ids.count { DownloadStore.get(targetContext, it)?.optString("state") == state }
+        val server = ThrottledMediaServer(File(evidence, "parallel-fixture.mp4").readBytes())
+        try {
+            targetContext.getSharedPreferences("quartz_downloads", 0).edit().putString("jobs", "[]").commit()
+            prefs.edit().putInt("parallelDownloads", 2).commit()
+            val jobs = ids.mapIndexed { i, id ->
+                val info = JSONObject().put("id", "73000$i").put("title", "Parallel download ${i + 1}").put("duration", 12)
+                    .put("extractor", "facebook:browser").put("extractor_key", "FacebookBrowser")
+                    .put("formats", JSONArray().put(JSONObject().put("format_id", "test-mp4").put("ext", "mp4")
+                        .put("url", "http://127.0.0.1:${server.port}/$i.mp4").put("protocol", "http")
+                        .put("height", 180).put("width", 320).put("vcodec", "h264").put("acodec", "aac")))
+                val key = FacebookMedia.save(targetContext, info); keys.add(key)
+                JSONObject().put("id", id).put("url", "https://www.facebook.com/watch/?v=73000$i").put("title", "Parallel download ${i + 1}")
+                    .put("state", "queued").put("mode", "video").put("quality", "best").put("type", "media")
+                    .put("createdAt", System.currentTimeMillis() + i).put("facebookMediaKey", key)
+            }
+            DownloadStore.addAll(targetContext, jobs); command()
+            waitUntil(90) { (server.sent["/0.mp4"]?.get() ?: 0) > 12000 && (server.sent["/1.mp4"]?.get() ?: 0) > 12000 }
+            check("Two real media transfers run together by default", count("downloading") == 2 && row(2).optString("state") == "queued")
+            check("Third transfer waits for a free slot", server.sent["/2.mp4"] == null)
+            waitUntil(15) { nm().activeNotifications.count { it.id == 2 && it.tag in ids } == 2 }
+            check("Each active download has its own notification", nm().activeNotifications.count { it.id == 2 && it.tag in ids } == 2)
+            val secondBefore = server.sent["/1.mp4"]!!.get()
+            nm().activeNotifications.first { it.id == 2 && it.tag == ids[0] }.notification.actions.first { it.title == "Pause" }.actionIntent.send()
+            waitUntil(30) { row(0).optString("state") == "paused" && (server.sent["/2.mp4"]?.get() ?: 0) > 8000 }
+            check("Pausing one download lets the next queued item start", row(0).optString("state") == "paused" && row(2).optString("state") == "downloading")
+            check("Pausing one download does not stop the other", server.sent["/1.mp4"]!!.get() > secondBefore)
+            prefs.edit().putInt("parallelDownloads", 3).commit(); command(DownloadService.ACTION_RESUME, ids[0])
+            waitUntil(60) { count("downloading") == 3 && server.ranges.get() > 0 }
+            check("Three simultaneous downloads and byte-range resume work", count("downloading") == 3 && server.ranges.get() > 0)
+            js("AppUI.navigate('downloads');refresh()")
+            screenshot("three-downloads")
+            snapshot("parallel-notifications.json")
+            val bytesBefore = server.sent.values.sumOf { it.get() }
+            shell("input keyevent KEYCODE_HOME"); Thread.sleep(2200)
+            check("Transfers continue while another app is in front", server.sent.values.sumOf { it.get() } > bytesBefore && count("downloading") == 3)
+            launch("", false)
+            prefs.edit().putInt("parallelDownloads", 1).commit(); command()
+            Thread.sleep(1200)
+            check("Lowering the limit does not interrupt active downloads", count("downloading") == 3)
+            command(DownloadService.ACTION_PAUSE_ALL)
+            waitUntil(30) { count("paused") == 3 && !DownloadService.active }
+            check("Pause all preserves every job", count("paused") == 3)
+            command(DownloadService.ACTION_RESUME_ALL)
+            waitUntil(60) { count("downloading") == 1 }
+            Thread.sleep(2000)
+            check("One-at-a-time setting is respected on resume", count("downloading") == 1 && count("queued") == 2)
+            js("AppUI.navigate('settings');refresh();document.getElementById('parallel-downloads').value='2';document.getElementById('parallel-downloads').dispatchEvent(new Event('change'))")
+            waitUntil(30) { count("downloading") == 2 }
+            check("Settings immediately adds a second slot", prefs.getInt("parallelDownloads", 0) == 2 && count("downloading") == 2)
+            check("Settings offers one, two and three downloads", js("[...document.getElementById('parallel-downloads').options].map(o=>o.value).join(',')") == "\"1,2,3\"")
+            check("Lightweight player bridge returns player state", js("typeof JSON.parse(QuartzNative.playerState())==='object'") == "true")
+            screenshot("parallel-settings")
+            server.fast = true
+            waitUntil(90) { count("complete") == 3 || count("failed") > 0 }
+            check("Every parallel download completes successfully", count("complete") == 3)
+            for (i in ids.indices) {
+                val uri = android.net.Uri.parse(row(i).getString("uri"))
+                val metadata = android.media.MediaMetadataRetriever()
+                try {
+                    metadata.setDataSource(targetContext, uri)
+                    check("Download ${i + 1} has valid video and audio", metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) == "yes" && metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong() in 11900..12200)
+                } finally { metadata.release() }
+            }
+            waitUntil(15) { !DownloadService.active }
+            check("Progress notifications clear after completion", nm().activeNotifications.none { it.id == 2 && it.tag in ids })
+            save("parallel-jobs.json", DownloadStore.all(targetContext))
+        } finally {
+            server.fast = true
+            if (DownloadService.active) { command(DownloadService.ACTION_PAUSE_ALL); waitUntil(30) { !DownloadService.active } }
+            ids.forEach { id ->
+                DownloadStore.get(targetContext, id)?.optString("uri")?.takeIf { it.isNotBlank() }?.let { targetContext.contentResolver.delete(android.net.Uri.parse(it), null, null) }
+                DownloadNotifications.dismiss(targetContext, id)
+                File(targetContext.filesDir, "working/$id").deleteRecursively()
+            }
+            keys.forEach { FacebookMedia.remove(targetContext, it) }; server.close()
+            targetContext.getSharedPreferences("quartz_downloads", 0).edit().putString("jobs", history).commit()
+            prefs.edit().putInt("parallelDownloads", oldLimit).commit()
+        }
+    }
+
+    private fun fastMatching() {
+        fun processes(): Int {
+            val field = com.yausername.youtubedl_android.YoutubeDL::class.java.getDeclaredField("idProcessMap").apply { isAccessible = true }
+            val map = field.get(null) as Map<*, *>
+            return synchronized(map) { map.entries.count { it.key.toString().startsWith("spotify-match-") && (it.value as? Process)?.isAlive == true } }
+        }
+        launch("", false)
+        val libraryFile = File(targetContext.filesDir, "spotify-library.json")
+        val oldLibrary = libraryFile.takeIf { it.exists() }?.readText()
+        val url = "https://open.spotify.com/playlist/quartz-performance-test"
+        val tracks = JSONArray().put(JSONObject().put("key", "0").put("uri", "spotify:track:0VjIjW4GlUZAMYd2vXMi3b").put("name", "Blinding Lights").put("artists", JSONArray().put("The Weeknd")).put("duration", 200))
+            .put(JSONObject().put("key", "1").put("uri", "spotify:track:quartz-tamally").put("name", "Tamally Maak").put("artists", JSONArray().put("Amr Diab")).put("duration", 269))
+        try {
+            for (i in 0 until tracks.length()) SpotifyMatchCache.invalidate(targetContext, tracks.getJSONObject(i))
+            PlaylistStore.save(targetContext, JSONObject().put("url", url).put("title", "Matching performance check").put("status", "ready").put("tracks", tracks))
+            val start = android.os.SystemClock.elapsedRealtime()
+            runOnMainSync { SpotifyService.command(targetContext, "match", url) }
+            var overlapping = false
+            waitUntil(180) {
+                if (processes() >= 2) overlapping = true
+                PlaylistStore.getFor(targetContext, url)?.optString("status") == "ready"
+            }
+            val firstMillis = android.os.SystemClock.elapsedRealtime() - start
+            val found = PlaylistStore.getFor(targetContext, url)!!.getJSONArray("tracks")
+            check("Two real YouTube match searches overlap", overlapping)
+            check("Both songs retain usable ranked candidates", (0 until found.length()).all { found.getJSONObject(it).getJSONArray("candidates").length() > 0 })
+            check("Each song is saved when its search completes", (0 until found.length()).all { found.getJSONObject(it).optBoolean("searched") })
+            val secondUrl = url + "-reimport"
+            val again = JSONArray(tracks.toString())
+            for (i in 0 until again.length()) again.getJSONObject(i).put("key", "reimport-$i")
+            PlaylistStore.save(targetContext, JSONObject().put("url", secondUrl).put("title", "Cache reuse check").put("status", "ready").put("tracks", again))
+            val cachedStart = android.os.SystemClock.elapsedRealtime()
+            runOnMainSync { SpotifyService.command(targetContext, "match", secondUrl) }
+            waitUntil(20) { PlaylistStore.getFor(targetContext, secondUrl)?.optString("status") == "ready" && PlaylistStore.getFor(targetContext, secondUrl)?.optJSONArray("tracks")?.optJSONObject(0)?.optBoolean("searched") == true }
+            val cachedMillis = android.os.SystemClock.elapsedRealtime() - cachedStart
+            check("Saved searches are reused across different playlists", cachedMillis < firstMillis && (0 until again.length()).all { PlaylistStore.getFor(targetContext, secondUrl)!!.getJSONArray("tracks").getJSONObject(it).getJSONArray("candidates").toString() == found.getJSONObject(it).getJSONArray("candidates").toString() })
+            check("Unrelated recording does not reuse another song's cache", SpotifyMatchCache.get(targetContext, JSONObject(tracks.getJSONObject(0).toString()).put("name", "Blinding Lights Live")) == null)
+            SpotifyMatchCache.invalidate(targetContext, tracks.getJSONObject(0))
+            check("Search again can invalidate a saved result", SpotifyMatchCache.get(targetContext, tracks.getJSONObject(0)) == null)
+            save("matching-timings.json", JSONObject().put("songs", 2).put("firstSearchMs", firstMillis).put("reimportMs", cachedMillis))
+            waitUntil(20) { !SpotifyService.active }
+            for (i in 0 until tracks.length()) SpotifyMatchCache.invalidate(targetContext, tracks.getJSONObject(i))
+            PlaylistStore.save(targetContext, JSONObject().put("url", url).put("title", "Pause search check").put("status", "ready").put("tracks", JSONArray(tracks.toString())))
+            runOnMainSync { SpotifyService.command(targetContext, "match", url) }
+            waitUntil(20) { processes() >= 2 }
+            runOnMainSync { SpotifyService.command(targetContext, "pause", url) }
+            waitUntil(20) { !SpotifyService.active }
+            val paused = PlaylistStore.getFor(targetContext, url)!!
+            check("Pausing parallel searches keeps the workspace paused", paused.optString("status") == "paused" && !paused.optBoolean("wantMatching"))
+            val pausedTracks = paused.getJSONArray("tracks").toString()
+            Thread.sleep(1200)
+            check("Cancelled searches cannot overwrite saved paused results", PlaylistStore.getFor(targetContext, url)!!.getJSONArray("tracks").toString() == pausedTracks)
+            runOnMainSync { SpotifyService.command(targetContext, "match", url) }
+            waitUntil(90) { PlaylistStore.getFor(targetContext, url)?.optString("status") == "ready" }
+            check("Parallel search resumes and finishes both songs", (0 until tracks.length()).all { PlaylistStore.getFor(targetContext, url)!!.getJSONArray("tracks").getJSONObject(it).optBoolean("searched") })
+            waitUntil(20) { !SpotifyService.active }
+        } finally {
+            if (SpotifyService.active) runOnMainSync { SpotifyService.command(targetContext, "pause", url); SpotifyService.command(targetContext, "pause", url + "-reimport") }
+            waitUntil(20) { !SpotifyService.active }
+            if (oldLibrary != null) libraryFile.writeText(oldLibrary) else libraryFile.delete()
+            for (i in 0 until tracks.length()) SpotifyMatchCache.invalidate(targetContext, tracks.getJSONObject(i))
+        }
+    }
     private fun facebookMedia() {
         launch("",false)
         val rawFile=File(targetContext.getExternalFilesDir(null),"tests-030/facebook-live-video.json")
@@ -501,6 +659,10 @@ class DownloadFlowInstrumentation : Instrumentation() {
     }
 
     private fun controls() {
+        val preferences = targetContext.getSharedPreferences("quartz_ui",0)
+        val limit = preferences.getInt("parallelDownloads",2)
+        preferences.edit().putInt("parallelDownloads",1).commit()
+        try {
         val before = DownloadStore.all(targetContext)
         val previous = (0 until before.length()).map { before.getJSONObject(it).optString("id") }.toSet()
         launch("https://youtu.be/UreOobGvswo", false);ready()
@@ -514,8 +676,8 @@ class DownloadFlowInstrumentation : Instrumentation() {
             first.isNotBlank() && second.isNotBlank() && nm().activeNotifications.any { it.id==DownloadNotifications.ACTIVE_ID }
         }
         snapshot("queued-progress.json")
-        waitUntil(15) { nm().activeNotifications.any { it.id==DownloadNotifications.ACTIVE_ID && it.notification.extras.getCharSequence("android.subText").toString().contains("1 waiting") } }
-        val progress = nm().activeNotifications.first { it.id==DownloadNotifications.ACTIVE_ID }.notification
+        waitUntil(15) { nm().activeNotifications.any { it.id==2 && it.tag==first && it.notification.extras.getCharSequence("android.subText").toString().contains("1 waiting") } }
+        val progress = nm().activeNotifications.first { it.id==2 && it.tag==first }.notification
         check("Ongoing notification displays queued count",progress.extras.getCharSequence("android.subText").toString().contains("1 waiting"))
         progress.actions.first { it.title=="Cancel" }.actionIntent.send()
         waitUntil(20) { DownloadStore.get(targetContext,first)?.optString("state")=="cancelled" }
@@ -549,6 +711,7 @@ class DownloadFlowInstrumentation : Instrumentation() {
         waitUntil(240) { DownloadStore.get(targetContext,failureId)?.optString("state")=="complete" }
         check("Notification Retry completes same job ID and original audio mode",DownloadStore.get(targetContext,failureId)?.optString("audioFormat")=="original")
         save("notification-retry-job.json",DownloadStore.get(targetContext,failureId)!!)
+        } finally { preferences.edit().putInt("parallelDownloads",limit).commit() }
     }
 
     private fun denied() {

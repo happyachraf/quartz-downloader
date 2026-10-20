@@ -28,8 +28,13 @@ class SpotifyService : Service() {
         }
     }
     private val worker = Executors.newSingleThreadExecutor()
+    private val searches = Executors.newFixedThreadPool(2)
+    private val searchIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val searchSession = java.util.UUID.randomUUID().toString()
+    private fun cancelSearches() { for (id in searchIds) YoutubeDL.destroyProcessById(id) }
     private val main = Handler(Looper.getMainLooper())
     private var busy = false
+    private var destroyed = false
     @Volatile private var currentUrl = ""
     @Volatile private var token = 0L
     private lateinit var wake: PowerManager.WakeLock
@@ -46,14 +51,17 @@ class SpotifyService : Service() {
         when (intent?.action) {
             "pause" -> {
                 PlaylistStore.updateFor(this, url) { it.put("wantMatching", false).put("importPaused", true).put("status", "paused").put("message", "Paused. Your YouTube matches are saved.") }
-                if (currentUrl == url) { token++; YoutubeDL.destroyProcessById("spotify-match") }
+                if (currentUrl == url) { token++; cancelSearches() }
             }
             "load" -> if (PlaylistStore.getFor(this, url) == null) PlaylistStore.save(this, JSONObject().put("url", url).put("status", "loading").put("title", "Loading playlist…"))
             "match" -> PlaylistStore.updateFor(this, url) { row ->
                 val key = intent?.getStringExtra("key").orEmpty()
                 if (key.isNotBlank()) {
                     val tracks = row.optJSONArray("tracks") ?: JSONArray()
-                    for (i in 0 until tracks.length()) if (tracks.getJSONObject(i).optString("key") == key) tracks.getJSONObject(i).put("searched", false).put("candidates", JSONArray())
+                    for (i in 0 until tracks.length()) if (tracks.getJSONObject(i).optString("key") == key) {
+                        SpotifyMatchCache.invalidate(this, tracks.getJSONObject(i))
+                        tracks.getJSONObject(i).put("searched", false).put("candidates", JSONArray())
+                    }
                 }
                 row.put("wantMatching", true).put("importPaused", false).put("retryAt", 0).put("status", if (row.has("tracks")) "queued" else "loading").put("message", "Waiting to continue finding matches…")
             }
@@ -62,7 +70,7 @@ class SpotifyService : Service() {
     }
     private fun pending() = PlaylistStore.all(this).filter { !it.optBoolean("importPaused") && (it.optBoolean("wantMatching") || it.optString("status") == "loading") }
     private fun pump() {
-        if (busy) return
+        if (busy || destroyed) return
         val next = pending().firstOrNull { it.optLong("retryAt") <= System.currentTimeMillis() }
         if (next == null) {
             if (pending().isNotEmpty()) { main.removeCallbacks(later); main.postDelayed(later, 15000); return }
@@ -84,27 +92,50 @@ class SpotifyService : Service() {
                 }
                 if (!state.optBoolean("wantMatching")) return@execute
                 MediaEngine.prepare(this)
+                if (generation != token || Thread.currentThread().isInterrupted) return@execute
                 PlaylistStore.updateFor(this, url) { it.put("status", "matching").put("message", "Finding YouTube matches. You can leave Quartz.") }
                 val tracks = state.getJSONArray("tracks")
-                for (i in 0 until tracks.length()) {
-                    if (generation != token || Thread.currentThread().isInterrupted) return@execute
-                    val row = tracks.getJSONObject(i)
-                    if ((row.optJSONArray("candidates")?.length() ?: 0) > 0 || row.optBoolean("searched")) continue
-                    PlaylistStore.updateFor(this, url) { it.put("message", "Finding matches ${i + 1} / ${tracks.length()}: ${row.optString("name")}") }
-                    main.post { notifyProgress() }
-                    val result = SpotifyMatcher.find(row, "spotify-match")
-                    if (generation != token) return@execute
-                    PlaylistStore.updateFor(this, url) { saved ->
-                        val stored = saved.getJSONArray("tracks")
-                        for (n in 0 until stored.length()) {
-                            val target = stored.getJSONObject(n)
-                            if (target.optString("key") != row.optString("key") || target.optBoolean("confirmed")) continue
-                            val best = result.optJSONObject(0)
-                            val strong = best != null && best.optDouble("score") >= .82 && best.optDouble("duration") > 0
-                            target.put("candidates", result).put("selectedUrl", best?.optString("url").orEmpty()).put("confirmed", false).put("searched", true)
-                                .put("status", if (best == null) "unmatched" else if (strong) "matched" else "review").put("message", if (best == null) "No audio match found. Try search again." else "")
+                val pendingTracks = (0 until tracks.length()).map { tracks.getJSONObject(it) }
+                    .filter { (it.optJSONArray("candidates")?.length() ?: 0) == 0 && !it.optBoolean("searched") }.iterator()
+                val completions = java.util.concurrent.ExecutorCompletionService<Pair<JSONObject, JSONArray>>(searches)
+                val futures = mutableListOf<java.util.concurrent.Future<Pair<JSONObject, JSONArray>>>()
+                var inFlight = 0
+                var sequence = 0
+                try {
+                    while (pendingTracks.hasNext() || inFlight > 0) {
+                        if (generation != token || Thread.currentThread().isInterrupted) return@execute
+                        while (inFlight < 2 && pendingTracks.hasNext()) {
+                            val row = pendingTracks.next()
+                            val processId = "spotify-match-$searchSession-$generation-${sequence++}"
+                            futures.add(completions.submit(java.util.concurrent.Callable {
+                                searchIds.add(processId)
+                                try { row to SpotifyMatcher.find(row, processId, this) { generation == token } }
+                                finally { searchIds.remove(processId) }
+                            }))
+                            inFlight++
                         }
+                        val completed = completions.poll(1, java.util.concurrent.TimeUnit.SECONDS) ?: continue
+                        inFlight--
+                        val (row, result) = completed.get()
+                        if (generation != token) return@execute
+                        PlaylistStore.updateFor(this, url) { saved ->
+                            val stored = saved.getJSONArray("tracks")
+                            for (n in 0 until stored.length()) {
+                                val target = stored.getJSONObject(n)
+                                if (target.optString("key") != row.optString("key") || target.optBoolean("confirmed")) continue
+                                val best = result.optJSONObject(0)
+                                val strong = best != null && best.optDouble("score") >= .82 && best.optDouble("duration") > 0
+                                target.put("candidates", result).put("selectedUrl", best?.optString("url").orEmpty()).put("confirmed", false).put("searched", true)
+                                    .put("status", if (best == null) "unmatched" else if (strong) "matched" else "review").put("message", if (best == null) "No audio match found. Try search again." else "")
+                            }
+                            val done = (0 until stored.length()).count { stored.getJSONObject(it).optBoolean("searched") || (stored.getJSONObject(it).optJSONArray("candidates")?.length() ?: 0) > 0 }
+                            saved.put("message", "Finding matches · $done / ${stored.length()} saved · 2 searches at once")
+                        }
+                        main.post { notifyProgress() }
                     }
+                } finally {
+                    futures.forEach { if (!it.isDone) it.cancel(true) }
+                    cancelSearches()
                 }
                 if (generation == token) PlaylistStore.updateFor(this, url) { it.put("status", "ready").put("wantMatching", false).put("message", "Search complete. YouTube matches saved on this phone.") }
             } catch (_: Exception) {
@@ -127,12 +158,12 @@ class SpotifyService : Service() {
         startForeground(1044, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
     }
     override fun onTimeout(startId: Int, fgsType: Int) {
-        token++; YoutubeDL.destroyProcessById("spotify-match")
+        token++; cancelSearches()
         for (row in pending()) PlaylistStore.updateFor(this, row.getString("url")) { it.put("importPaused", true).put("wantMatching", false).put("status", "paused").put("message", "Android paused background work. Resume to continue from saved matches.") }
         stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
     }
     override fun onDestroy() {
-        active = false; token++; main.removeCallbacksAndMessages(null); YoutubeDL.destroyProcessById("spotify-match"); worker.shutdownNow()
+        destroyed = true; active = false; token++; main.removeCallbacksAndMessages(null); cancelSearches(); worker.shutdownNow(); searches.shutdownNow()
         if (::wake.isInitialized && wake.isHeld) wake.release()
         super.onDestroy()
     }
