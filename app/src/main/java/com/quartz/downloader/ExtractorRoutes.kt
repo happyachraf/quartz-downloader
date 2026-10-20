@@ -20,9 +20,13 @@ object ExtractorRoutes {
         return if (preferred in routes) listOf(preferred) + routes.filter { it != preferred } else routes
     }
 
-    fun configure(request: YoutubeDLRequest, url: String, route: String, cookies: File?): YoutubeDLRequest {
+    fun configure(request: YoutubeDLRequest, url: String, route: String, cookies: File?, userAgent: String = ""): YoutubeDLRequest {
         request.addOption("--no-playlist").addOption("--socket-timeout", 30)
         if (UrlPolicy.isTwitter(url)) request.addOption("--playlist-items", "1")
+        if (UrlPolicy.isFacebook(url)) {
+            if (userAgent.isNotBlank()) request.addOption("--user-agent", userAgent)
+            request.addOption("--referer", url)
+        }
         when {
             route == TWITTER_PUBLIC && UrlPolicy.isTwitter(url) -> request.addOption("--extractor-args", "twitter:api=syndication")
             route == YOUTUBE_ANDROID && UrlPolicy.isYoutube(url) -> request.addOption("--extractor-args", "youtube:player_client=android")
@@ -32,10 +36,10 @@ object ExtractorRoutes {
         return request
     }
 
-    fun inspect(url: String, cookies: File?): Pair<VideoInfo, String> {
+    fun inspect(url: String, cookies: File?, userAgent: String = ""): Pair<VideoInfo, String> {
         var lastError: Exception? = null
         for (route in candidates(url)) {
-            try { return YoutubeDL.getInfo(configure(YoutubeDLRequest(url), url, route, cookies)) to route }
+            try { return YoutubeDL.getInfo(configure(YoutubeDLRequest(url), url, route, cookies, userAgent)) to route }
             catch (error: Exception) {
                 if (error is InterruptedException || Thread.currentThread().isInterrupted) throw error
                 lastError = error

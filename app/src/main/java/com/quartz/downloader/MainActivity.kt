@@ -33,6 +33,7 @@ open class MainActivity : Activity() {
     @Volatile private var pageReady = false
     @Volatile private var pendingLink = ""
     @Volatile private var previewUrl = ""
+    @Volatile private var previewResolvedUrl = ""
     @Volatile private var previewHeights = emptySet<Int>()
     @Volatile private var previewTitle = ""
     @Volatile private var previewThumbnail = ""
@@ -46,6 +47,8 @@ open class MainActivity : Activity() {
     private var notificationRequest = false
     private var pendingDownloadFocus = ""
     private var pendingTab = ""
+    private var facebookSignInLink = ""
+    private var lastFacebookLink = ""
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -173,19 +176,24 @@ open class MainActivity : Activity() {
         @JavascriptInterface fun inspect(raw: String) {
             val url = try { UrlPolicy.normalize(raw) } catch (e: Exception) { error(e.message ?: "Paste a complete link."); return }
             if (UrlPolicy.isSpotify(url)) { previewGeneration.incrementAndGet(); previewUrl = ""; loadPlaylist(url); return }
+            lastFacebookLink = url.takeIf { UrlPolicy.isFacebook(it) }.orEmpty()
             val generation = previewGeneration.incrementAndGet()
             previewUrl = ""
-            send("previewLoading", JSONObject().put("url", url))
+            send("previewLoading", JSONObject().put("url", url).put("message", if (UrlPolicy.isFacebook(url)) "Opening Facebook with your saved session…" else "Finding available video formats…"))
             worker.execute {
                 var cookies: File? = null
                 try {
+                    val facebook = if (UrlPolicy.isFacebook(url)) FacebookSession.resolve(this@MainActivity, url) { generation == previewGeneration.get() } else null
+                    val resolvedUrl = facebook?.url ?: url
+                    if (generation != previewGeneration.get()) return@execute
                     MediaEngine.prepare(this@MainActivity)
-                    cookies = BrowserCookies.create(this@MainActivity, url)
-                    val (info, route) = ExtractorRoutes.inspect(url, cookies)
+                    cookies = BrowserCookies.create(this@MainActivity, resolvedUrl)
+                    val (info, route) = ExtractorRoutes.inspect(resolvedUrl, cookies, facebook?.userAgent.orEmpty())
                     val qualities = Quality.offered(info.formats, UrlPolicy.isTikTok(url))
                     if (UrlPolicy.isTikTok(url) && qualities.isEmpty()) throw IllegalStateException("No clean TikTok format")
                     if (generation != previewGeneration.get()) return@execute
                     previewUrl = url
+                    previewResolvedUrl = resolvedUrl
                     previewHeights = qualities.map { it.height }.toSet()
                     previewTitle = info.title ?: info.fulltitle ?: "Untitled video"
                     previewThumbnail = info.thumbnail.orEmpty()
@@ -204,7 +212,16 @@ open class MainActivity : Activity() {
                         .put("audioBytes", Quality.audioBytes(info.formats, info.duration)).put("hasAudio",previewAudioAvailable).put("hasVideo",previewVideoAvailable))
                 } catch (e: Exception) {
                     if (generation != previewGeneration.get()) return@execute
-                    val networkError = Regex("no address associated|unable to resolve|network is unreachable|timed out", RegexOption.IGNORE_CASE).containsMatchIn(e.message.orEmpty())
+                    val networkError = Regex("no address associated|unable to resolve|network is unreachable|timed out|connection|could not load facebook", RegexOption.IGNORE_CASE).containsMatchIn(e.message.orEmpty())
+                    if (UrlPolicy.isFacebook(url)) {
+                        val login = e is FacebookSession.LoginRequired || Regex("login required|log in|sign in|login to|login\\.php|checkpoint", RegexOption.IGNORE_CASE).containsMatchIn(e.message.orEmpty())
+                        error(when {
+                            login -> "Sign in to Facebook to continue. Quartz will retry this video when you return and use your saved session for future shares."
+                            networkError -> "Quartz could not reach Facebook. Check your connection and try again."
+                            else -> "Facebook did not provide a downloadable video for this post using your saved session. Check that the post contains a video and is still available to your account."
+                        }, if (login) "facebook" else null)
+                        return@execute
+                    }
                     if (UrlPolicy.isTwitter(url) && !networkError) {
                         error(ExtractorRoutes.X_HINT, "x")
                         return@execute
@@ -230,6 +247,7 @@ open class MainActivity : Activity() {
             }
             val id = UUID.randomUUID().toString()
             val job = JSONObject().put("id", id).put("url", url).put("mode", mode)
+                .put("resolvedUrl", previewResolvedUrl)
                 .put("quality", if (mode == "audio") "best" else choice)
                 .put("extractorRoute", previewRoute)
                 .put("selector", previewTikTokChoices[choice] ?: "")
@@ -400,6 +418,7 @@ open class MainActivity : Activity() {
                 else -> return
             }
             runOnUiThread {
+                if (site == "facebook") facebookSignInLink = lastFacebookLink
                 startActivity(Intent(this@MainActivity, BrowserActivity::class.java)
                     .putExtra("url", target.first).putExtra("account", target.second))
             }
@@ -511,6 +530,10 @@ open class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (facebookSignInLink.isNotBlank() && BrowserCookies.status().optBoolean("facebook")) {
+            val retry = facebookSignInLink; facebookSignInLink = ""
+            send("sharedLink", JSONObject().put("url", retry).put("popup", true))
+        }
         if(!shareOnly){AppUpdates.resume(this);AppUpdates.check(this,false)}
         try {
             if (!DownloadService.active) {

@@ -13,7 +13,8 @@ object BrowserCookies {
     @Synchronized fun cleanInactive(context:Context){File(context.cacheDir,"sessions").listFiles()?.filter{it.absolutePath !in activeFiles}?.forEach{it.delete()}}
     private fun cookies(domain: String, extraUrl: String? = null): Map<String, String> {
         val values = linkedMapOf<String, String>()
-        for (source in listOfNotNull("https://$domain/", "https://www.$domain/", extraUrl)) {
+        val aliases = if (domain == "facebook.com") listOf("https://m.facebook.com/", "https://web.facebook.com/") else emptyList()
+        for (source in listOf("https://$domain/", "https://www.$domain/") + aliases + listOfNotNull(extraUrl)) {
             for (cookie in CookieManager.getInstance().getCookie(source).orEmpty().split(';')) {
                 val pair = cookie.trim().split('=', limit = 2)
                 if (pair.size != 2 || pair[0].isBlank() || pair.any { it.contains('\n') || it.contains('\r') || it.contains('\t') }) continue

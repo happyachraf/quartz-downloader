@@ -102,7 +102,7 @@ class DownloadService : Service() {
 
     private fun download(id: String) {
         val job = DownloadStore.get(this, id) ?: return
-        val url = job.optString("url")
+        var url = job.optString("url")
         val mode = job.optString("mode", "video")
         val quality = job.optString("quality", "best")
         val audioFormat = job.optString("audioFormat", "mp3")
@@ -112,8 +112,13 @@ class DownloadService : Service() {
             if (synchronized(cancelled) { id in cancelled } || job.optString("state") !in RUNNING) return
             currentId = id
             if (mode == "audio") DownloadStore.update(this, id, JSONObject().put("audioFormat", audioFormat).put("audioQuality", if (audioFormat == "mp3") 320 else 0))
-            DownloadStore.update(this, id, JSONObject().put("state", "preparing").put("message", "Preparing media tools…"))
+            DownloadStore.update(this, id, JSONObject().put("state", "preparing").put("message", if (UrlPolicy.isFacebook(url)) "Opening Facebook with your saved session…" else "Preparing media tools…"))
             refreshProgress()
+            val facebook = if (UrlPolicy.isFacebook(url)) FacebookSession.resolve(this, job.optString("resolvedUrl").takeIf { UrlPolicy.isFacebook(it) } ?: url) {
+                !synchronized(cancelled) { id in cancelled } && !Thread.currentThread().isInterrupted
+            } else null
+            url = facebook?.url ?: url
+            if (synchronized(cancelled) { id in cancelled }) return
             MediaEngine.prepare(this)
             FFmpeg.init(this)
             dir.mkdirs()
@@ -123,7 +128,7 @@ class DownloadService : Service() {
                     val name = "${job.optString("spotifyArtists")} - ${job.optString("spotifyTitle")}".replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), " ").take(160).trim().trimEnd('.')
                     File(dir, name.replace("%", "%%") + " [%(id)s].%(ext)s")
                 } else File(dir, "%(title).160s [%(id)s].%(ext)s")
-                val next = ExtractorRoutes.configure(YoutubeDLRequest(url), url, route, cookies)
+                val next = ExtractorRoutes.configure(YoutubeDLRequest(url), url, route, cookies, facebook?.userAgent.orEmpty())
                     .addOption("--continue").addOption("--retries", 3).addOption("--fragment-retries", 3)
                     .addOption("--newline")
                     .addOption("--write-info-json")
@@ -218,6 +223,8 @@ class DownloadService : Service() {
                 "no address associated" in text || "unable to resolve" in text || "network is unreachable" in text || "timed out" in text -> "Quartz could not reach this website. Check your internet connection and try again."
                 "requested format" in text || "format is not available" in text -> "That quality is no longer available. Preview the link again."
                 "cover" in text || "audio tags" in text -> "The cover picture could not be saved. Tap Retry to finish the download."
+                UrlPolicy.isFacebook(url) && (error is FacebookSession.LoginRequired || "login" in text || "sign in" in text || "log in" in text) -> FacebookSession.LoginRequired().message!!
+                UrlPolicy.isFacebook(url) -> "Facebook did not provide this video using your saved session. Check that the post is still available to your account, then tap Retry."
                 UrlPolicy.isTwitter(url) -> ExtractorRoutes.X_HINT
                 "sign in" in text || "login" in text || "cookie" in text -> "This website needs a login. Open its sign-in page inside Quartz and preview the link again."
                 "403" in text || "429" in text -> "The website declined the download. Please try again later."

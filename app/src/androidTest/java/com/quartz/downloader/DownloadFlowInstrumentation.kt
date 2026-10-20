@@ -16,18 +16,21 @@ import java.util.concurrent.TimeUnit
 /** Device checks run against the release APK. This class is only in the separate test APK. */
 class DownloadFlowInstrumentation : Instrumentation() {
     private var phase = "share"
+    private var facebookUrl = "https://www.facebook.com/100033620354545/videos/106560053808006/"
     private lateinit var evidence: File
     private val checks = JSONArray()
     private var activity: MainActivity? = null
     override fun onCreate(arguments: Bundle?) {
         super.onCreate(arguments)
         phase = arguments?.getString("phase") ?: "share"
+        facebookUrl = arguments?.getString("facebookUrl") ?: facebookUrl
         start()
     }
     override fun onStart() {
         evidence = File(targetContext.getExternalFilesDir(null), "tests-030").apply { mkdirs() }
         try {
             when (phase) {
+                "facebook-session" -> facebookSession()
                 "spotify-history" -> spotifyHistory()
                 "bulk-selection" -> bulkSelection()
                 "app-updates" -> appUpdates()
@@ -62,6 +65,74 @@ class DownloadFlowInstrumentation : Instrumentation() {
         }
     }
     private fun check(name: String, condition: Boolean) { if (!condition) error(name); checks.put(name) }
+    private fun facebookSession() {
+        launch("",false)
+        check("Facebook host accepted", UrlPolicy.isFacebook("https://m.facebook.com/share/abc/"))
+        check("Facebook lookalike host rejected", !UrlPolicy.isFacebook("https://facebook.com.example.org/video"))
+        check("Facebook watch short host accepted", UrlPolicy.isFacebook("https://fb.watch/abc/"))
+        check("Reel becomes video permalink", FacebookSession.permalink("https://www.facebook.com/reel/123456/?share=abc") == "https://www.facebook.com/watch/?v=123456")
+        check("Video permalink preserved", FacebookSession.permalink("https://m.facebook.com/page/videos/123456/") == "https://www.facebook.com/watch/?v=123456")
+        check("Post redirect keeps post identity and removes tracking", FacebookSession.permalink("https://web.facebook.com/example/posts/123456/?rdid=abc") == "https://www.facebook.com/example/posts/123456/")
+        check("Share token is not mistaken for a video identifier", FacebookSession.permalink("https://www.facebook.com/share/example-token/") == null)
+        check("External canonical URL rejected", FacebookSession.choose(JSONObject().put("canonical","https://example.com/reel/123456/").put("url","https://web.facebook.com/page/posts/123456/"), "https://www.facebook.com/share/abc/") == "https://www.facebook.com/page/posts/123456/")
+        check("Facebook login redirect recognized", FacebookSession.needsLogin("https://m.facebook.com/login/?next=video"))
+        check("Ordinary post not mistaken for login", !FacebookSession.needsLogin("https://www.facebook.com/page/posts/123456/"))
+        check("Facebook home login form is recognized", FacebookSession.needsLogin(JSONObject().put("url","https://m.facebook.com/?next=video").put("loginForm",true)))
+        check("Login overlay on public post does not imply a required login", !FacebookSession.needsLogin(JSONObject().put("url","https://www.facebook.com/page/posts/123456/").put("loginForm",true)))
+        val cookie=android.webkit.CookieManager.getInstance()
+        val cookieName="quartz_browser_test"
+        var accepted=false
+        var initiallyPresent=false
+        try {
+            val fixture=FacebookSession.resolvePage(targetContext,"https://www.facebook.com/share/example-token/",{true}) { view,_ ->
+                val delegate=view.webViewClient
+                view.webViewClient=object:android.webkit.WebViewClient(){
+                    override fun onPageStarted(v:WebView,u:String,i:Bitmap?){delegate.onPageStarted(v,u,i)}
+                    override fun onPageFinished(v:WebView,u:String){
+                        cookie.setCookie("https://www.facebook.com/","$cookieName=refreshed; Domain=.facebook.com; Path=/; Max-Age=3600; Secure; HttpOnly") { saved ->
+                            accepted=saved
+                            initiallyPresent=cookie.getCookie("https://www.facebook.com/").orEmpty().contains("$cookieName=refreshed")
+                            delegate.onPageFinished(v,u)
+                        }
+                    }
+                }
+                view.loadDataWithBaseURL("https://www.facebook.com/share/example-token/","<html><head><link rel='canonical' href='https://www.facebook.com/example/posts/123456/'></head><body>Video page</body></html>","text/html","UTF-8",null)
+            }
+            check("Actual WebView resolves share to canonical post before extraction",fixture.url=="https://www.facebook.com/example/posts/123456/")
+            val export=BrowserCookies.create(targetContext,fixture.url) ?: error("Browser session missing")
+            try {
+                val present=export.readText().contains("$cookieName\trefreshed")
+                save("facebook-cookie-fixture.json",JSONObject().put("cookieAccepted",accepted).put("initiallyPresent",initiallyPresent).put("browserContainsFixture",cookie.getCookie("https://www.facebook.com/").orEmpty().contains("$cookieName=refreshed")).put("exportContainsFixture",present).put("fixtureLines",JSONArray(export.readLines().filter{it.contains(cookieName)})))
+                check("Refreshed HttpOnly browser cookie reaches extraction",present)
+            } finally { BrowserCookies.release(export) }
+            check("Cancelled resolution exits without opening a browser activity",runCatching { FacebookSession.resolve(targetContext,fixture.url){false} }.exceptionOrNull() is InterruptedException)
+        }finally {
+            val cleared=CountDownLatch(1)
+            runOnMainSync{cookie.setCookie("https://www.facebook.com/","$cookieName=; Domain=.facebook.com; Path=/; Max-Age=0; Secure"){cleared.countDown()}}
+            cleared.await(10,TimeUnit.SECONDS)
+        }
+        val url=facebookUrl
+        val page=runCatching { FacebookSession.resolve(targetContext,url) }
+        save("facebook-live-resolution.json",JSONObject().put("sharedUrl",url).put("resolvedUrl",page.getOrNull()?.url).put("loginRequired",page.exceptionOrNull() is FacebookSession.LoginRequired).put("error",page.exceptionOrNull()?.message))
+        check("Actual Facebook browser resolves or identifies login", page.isSuccess || page.exceptionOrNull() is FacebookSession.LoginRequired)
+        launch(url)
+        waitUntil(15){js("document.getElementById('download-sheet').open")=="true"}
+        check("Share keeps options sheet open during Facebook resolution", js("document.getElementById('download-sheet').open") == "true")
+        waitUntil(120){js("!document.getElementById('download-sheet-confirm').disabled || !!document.querySelector('#download-sheet-content .download-loading button')")=="true"}
+        val available=js("!document.getElementById('download-sheet-confirm').disabled")=="true"
+        save("facebook-live-share.json",JSONObject().put("sharedUrl",url).put("formatsAvailable",available).put("visibleText",js("document.getElementById('download-sheet-content').innerText")))
+        check("Sharing stays in Quartz share sheet", activity is ShareActivity && uiAutomation.rootInActiveWindow?.packageName?.toString()=="com.quartz.downloader")
+        check("Facebook does not require manual browser button",js("![...document.querySelectorAll('#download-sheet-content button')].some(b=>b.textContent==='Open in Quartz browser')")=="true")
+        if(!available)check("Unavailable or login response is explained",js("document.getElementById('download-sheet-content').innerText.includes('Facebook')")=="true")
+        screenshot("facebook-share-session")
+        if(!available){
+            val browser=startActivitySync(Intent(targetContext,BrowserActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("url",url)) as BrowserActivity
+            try {
+                Thread.sleep(12000)
+                save("facebook-browser-page.json", browserJs(browser,"web","JSON.stringify({url:location.href,title:document.title,canonical:document.querySelector('link[rel=canonical]')?.href,ogUrl:document.querySelector('meta[property=\"og:url\"]')?.content,videoCount:document.querySelectorAll('video').length,loginForm:!!document.querySelector('input[type=password]'),bodyText:document.body.innerText.slice(0,600)})"))
+            }finally{runOnMainSync{browser.finish()}}
+        }
+    }
     private fun appUpdates() {
         val version="0.3.4"
         val name="Quartz-Downloader-Android-$version.apk"

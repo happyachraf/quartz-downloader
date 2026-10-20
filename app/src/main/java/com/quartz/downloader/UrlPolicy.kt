@@ -28,6 +28,11 @@ object UrlPolicy {
 
     fun isSpotify(url: String): Boolean = Uri.parse(url).host?.lowercase() == "open.spotify.com"
 
+    fun isFacebook(url: String): Boolean {
+        val host = Uri.parse(url).host?.lowercase() ?: return false
+        return host == "facebook.com" || host.endsWith(".facebook.com") || host == "fb.watch"
+    }
+
     fun isTwitter(url: String): Boolean {
         val host = Uri.parse(url).host?.lowercase() ?: return false
         return host == "x.com" || host.endsWith(".x.com") || host == "twitter.com" || host.endsWith(".twitter.com")

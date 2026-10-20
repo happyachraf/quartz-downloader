@@ -79,6 +79,7 @@
     content.scrollTop = scroll;
   }
   window.DownloadSheet = {
+    status(message){if(!data&&sheet.open&&message){const title=content.querySelector('.download-loading strong');if(title)title.textContent=message;}},
     openCurrent(){if(!data||data.url!==current)return false;popup=true;render();show();return true;},
     shared(url) {
       if (/open\.spotify\.com\/(?:intl-[^/]+\/)?playlist\//.test(url)) {
@@ -98,11 +99,12 @@
       if (!sheet.open) return;
       data = null; content.replaceChildren();
       const box = document.createElement('div'); box.className = 'download-loading';
-      const title = document.createElement('strong'); title.textContent = 'Could not load this video';
+      const title = document.createElement('strong'); title.textContent = value.signIn==='facebook'?'Facebook sign-in needed':'Could not load this video';
       const message = document.createElement('p'); message.textContent = value.message; box.append(title,message);
       const retry = document.createElement('button'); retry.className = 'secondary'; retry.textContent = 'Try again'; retry.onclick=()=>{loading($('link').value);inspect();}; box.append(retry);
-      const browser = document.createElement('button'); browser.className = 'secondary'; browser.textContent = value.signIn === 'x' ? 'Sign in to X' : 'Open in Quartz browser';
-      browser.onclick=()=>value.signIn==='x'?native('signIn','x'):native('browser',$('link').value); box.append(browser);content.append(box);
+      const facebook=/^https:\/\/(?:[^/]+\.)?facebook\.com\/|^https:\/\/fb\.watch\//i.test($('link').value);
+      if(value.signIn || !facebook){const browser = document.createElement('button'); browser.className = 'secondary'; browser.textContent = value.signIn === 'x' ? 'Sign in to X' : value.signIn==='facebook'?'Sign in to Facebook':'Open in Quartz browser';
+      browser.onclick=()=>value.signIn?native('signIn',value.signIn):native('browser',$('link').value);box.append(browser);}content.append(box);
       confirm.disabled=true;setConfirm('Choose a format to download');$('download-sheet-note').textContent='';
     },
     back(){if(!sheet.open)return false;close();return true;}

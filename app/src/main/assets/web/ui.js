@@ -12,11 +12,11 @@ function notice(message, signIn) {
   const text = document.createElement('span');
   text.textContent = message;
   $('notice').append(text);
-  if (signIn === 'x') {
+  if (['x', 'facebook'].includes(signIn)) {
     const button = document.createElement('button');
     button.className = 'notice-action';
-    button.textContent = 'Sign in to X';
-    button.onclick = () => native('signIn', 'x');
+    button.textContent = signIn === 'x' ? 'Sign in to X' : 'Sign in to Facebook';
+    button.onclick = () => native('signIn', signIn);
     $('notice').append(button);
   }
   $('notice').classList.toggle('show', !!message);
@@ -211,7 +211,7 @@ window.Quartz = {
     if(event==='sharedLink'||event==='focusDownload')window.AppUI?.navigate(event==='sharedLink'&&/open\.spotify\.com\//.test(data.url)?'spotify':'downloads');
     window.SpotifyUI?.receive(event, data);
     if (event === 'sharedLink') { if (settingsOpen) showSettings(false); $('link').value = data.url; if (!window.DownloadSheet?.shared(data.url)) inspect(); }
-    if (event === 'previewLoading') notice('Finding available video formats…');
+    if (event === 'previewLoading') { notice(data.message || 'Finding available video formats…'); window.DownloadSheet?.status(data.message); }
     if (event === 'preview') renderPreview(data);
     if (event === 'error') { notice(data.message, data.signIn); window.DownloadSheet?.error(data); }
     if (event === 'queued') { notice('Added to downloads. You can keep using your phone.'); refresh(); }
