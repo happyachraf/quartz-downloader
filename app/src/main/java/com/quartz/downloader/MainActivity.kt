@@ -34,6 +34,7 @@ open class MainActivity : Activity() {
     @Volatile private var pendingLink = ""
     @Volatile private var previewUrl = ""
     @Volatile private var previewResolvedUrl = ""
+    @Volatile private var previewFacebookMedia: JSONObject? = null
     @Volatile private var previewHeights = emptySet<Int>()
     @Volatile private var previewTitle = ""
     @Volatile private var previewThumbnail = ""
@@ -179,6 +180,7 @@ open class MainActivity : Activity() {
             lastFacebookLink = url.takeIf { UrlPolicy.isFacebook(it) }.orEmpty()
             val generation = previewGeneration.incrementAndGet()
             previewUrl = ""
+            previewFacebookMedia = null
             send("previewLoading", JSONObject().put("url", url).put("message", if (UrlPolicy.isFacebook(url)) "Opening Facebook with your saved session…" else "Finding available video formats…"))
             worker.execute {
                 var cookies: File? = null
@@ -188,12 +190,14 @@ open class MainActivity : Activity() {
                     if (generation != previewGeneration.get()) return@execute
                     MediaEngine.prepare(this@MainActivity)
                     cookies = BrowserCookies.create(this@MainActivity, resolvedUrl)
-                    val (info, route) = ExtractorRoutes.inspect(resolvedUrl, cookies, facebook?.userAgent.orEmpty())
+                    val (info, route) = facebook?.media?.let { FacebookMedia.videoInfo(it) to FacebookMedia.ROUTE }
+                        ?: ExtractorRoutes.inspect(resolvedUrl, cookies, facebook?.userAgent.orEmpty())
                     val qualities = Quality.offered(info.formats, UrlPolicy.isTikTok(url))
                     if (UrlPolicy.isTikTok(url) && qualities.isEmpty()) throw IllegalStateException("No clean TikTok format")
                     if (generation != previewGeneration.get()) return@execute
                     previewUrl = url
                     previewResolvedUrl = resolvedUrl
+                    previewFacebookMedia = facebook?.media
                     previewHeights = qualities.map { it.height }.toSet()
                     previewTitle = info.title ?: info.fulltitle ?: "Untitled video"
                     previewThumbnail = info.thumbnail.orEmpty()
@@ -246,8 +250,10 @@ open class MainActivity : Activity() {
                 return
             }
             val id = UUID.randomUUID().toString()
+            val facebookKey=previewFacebookMedia?.let{FacebookMedia.save(this@MainActivity,it)}.orEmpty()
             val job = JSONObject().put("id", id).put("url", url).put("mode", mode)
                 .put("resolvedUrl", previewResolvedUrl)
+                .put("facebookMediaKey", facebookKey)
                 .put("quality", if (mode == "audio") "best" else choice)
                 .put("extractorRoute", previewRoute)
                 .put("selector", previewTikTokChoices[choice] ?: "")

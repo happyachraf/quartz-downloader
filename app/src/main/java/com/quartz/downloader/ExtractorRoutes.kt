@@ -15,6 +15,7 @@ object ExtractorRoutes {
         val routes = when {
             UrlPolicy.isTwitter(url) -> listOf(DEFAULT, TWITTER_PUBLIC)
             UrlPolicy.isYoutube(url) -> listOf(DEFAULT, YOUTUBE_ANDROID)
+            UrlPolicy.isFacebook(url) -> listOf(FacebookMedia.ROUTE)
             else -> listOf(DEFAULT)
         }
         return if (preferred in routes) listOf(preferred) + routes.filter { it != preferred } else routes

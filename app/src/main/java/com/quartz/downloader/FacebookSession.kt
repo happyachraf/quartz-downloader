@@ -19,7 +19,7 @@ import java.util.concurrent.TimeUnit
  * Website content gets no native bridge and never replaces the trusted share sheet. */
 object FacebookSession {
     class LoginRequired : IllegalStateException("Facebook needs you to sign in. Quartz will use your saved session automatically after sign-in.")
-    data class Page(val url: String, val userAgent: String)
+    data class Page(val url: String, val userAgent: String, val media: JSONObject? = null)
 
     fun permalink(raw: String): String? {
         if (!UrlPolicy.isFacebook(raw)) return null
@@ -62,7 +62,8 @@ object FacebookSession {
     @SuppressLint("SetJavaScriptEnabled")
     internal fun resolvePage(context: Context, raw: String, current: () -> Boolean, load: (WebView, String) -> Unit): Page {
         check(Looper.myLooper() != Looper.getMainLooper()) { "Resolve Facebook off the main thread." }
-        require(UrlPolicy.isFacebook(raw))
+        require(UrlPolicy.normalize(raw)==raw&&UrlPolicy.isFacebook(raw))
+        val script=context.assets.open("web/facebook-media.js").bufferedReader().use{it.readText()}
         val main = Handler(Looper.getMainLooper())
         val done = CountDownLatch(1)
         var web: WebView? = null
@@ -72,6 +73,7 @@ object FacebookSession {
         var lastUrl = ""
         var stable = 0
         var loaded = false
+        val started = android.os.SystemClock.elapsedRealtime()
         lateinit var probe: Runnable
         fun finish(page: Page? = null, error: Exception? = null) {
             if (finished) return
@@ -82,15 +84,17 @@ object FacebookSession {
             val view = web ?: return@Runnable
             if (finished) return@Runnable
             if (!current()) { finish(error = InterruptedException("Preview cancelled")); return@Runnable }
-            view.evaluateJavascript("""(() => ({url:location.href,canonical:document.querySelector('link[rel="canonical"]')?.href||'',ogUrl:document.querySelector('meta[property="og:url"]')?.content||'',loginForm:!!document.querySelector('input[type=password]')}))()""") { value ->
+            view.evaluateJavascript(script) { value ->
                 if (finished) return@evaluateJavascript
                 try {
                     val page = JSONObject(value)
                     val address = page.optString("url")
-                    if (needsLogin(page)) { finish(error = LoginRequired()); return@evaluateJavascript }
                     val resolved = choose(page, raw)
+                    val media=FacebookMedia.validate(page.optJSONObject("media"),resolved)
+                    if(media!=null&&permalink(resolved)!=null){CookieManager.getInstance().flush();finish(Page(media.getString("webpage_url"),view.settings.userAgentString,media));return@evaluateJavascript}
+                    if (needsLogin(page)) { finish(error = LoginRequired()); return@evaluateJavascript }
                     stable = if (resolved == lastUrl) stable + 1 else 0; lastUrl = resolved
-                    if (loaded && stable >= 1 && permalink(resolved) != null && UrlPolicy.isFacebook(address)) {
+                    if (loaded && stable >= 1 && permalink(resolved) != null && UrlPolicy.isFacebook(address) && android.os.SystemClock.elapsedRealtime()-started>8000) {
                         CookieManager.getInstance().flush()
                         finish(Page(resolved, view.settings.userAgentString))
                     } else main.postDelayed(probe, 750)

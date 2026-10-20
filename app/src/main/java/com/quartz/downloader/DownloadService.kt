@@ -114,9 +114,14 @@ class DownloadService : Service() {
             if (mode == "audio") DownloadStore.update(this, id, JSONObject().put("audioFormat", audioFormat).put("audioQuality", if (audioFormat == "mp3") 320 else 0))
             DownloadStore.update(this, id, JSONObject().put("state", "preparing").put("message", if (UrlPolicy.isFacebook(url)) "Opening Facebook with your saved session…" else "Preparing media tools…"))
             refreshProgress()
-            val facebook = if (UrlPolicy.isFacebook(url)) FacebookSession.resolve(this, job.optString("resolvedUrl").takeIf { UrlPolicy.isFacebook(it) } ?: url) {
+            var browserInfo = FacebookMedia.file(this,job.optString("facebookMediaKey"))
+            val facebook = if (UrlPolicy.isFacebook(url) && browserInfo==null) FacebookSession.resolve(this, url) {
                 !synchronized(cancelled) { id in cancelled } && !Thread.currentThread().isInterrupted
             } else null
+            facebook?.media?.let {
+                val key=FacebookMedia.save(this,it,job.optString("facebookMediaKey"));job.put("facebookMediaKey",key)
+                DownloadStore.update(this,id,JSONObject().put("facebookMediaKey",key));browserInfo=FacebookMedia.file(this,key)
+            }
             url = facebook?.url ?: url
             if (synchronized(cancelled) { id in cancelled }) return
             MediaEngine.prepare(this)
@@ -128,7 +133,8 @@ class DownloadService : Service() {
                     val name = "${job.optString("spotifyArtists")} - ${job.optString("spotifyTitle")}".replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), " ").take(160).trim().trimEnd('.')
                     File(dir, name.replace("%", "%%") + " [%(id)s].%(ext)s")
                 } else File(dir, "%(title).160s [%(id)s].%(ext)s")
-                val next = ExtractorRoutes.configure(YoutubeDLRequest(url), url, route, cookies, facebook?.userAgent.orEmpty())
+                val source=browserInfo?.let{YoutubeDLRequest(emptyList<String>()).addOption("--load-info-json",it.absolutePath)}?:YoutubeDLRequest(url)
+                val next = ExtractorRoutes.configure(source, url, route, cookies, facebook?.userAgent.orEmpty())
                     .addOption("--continue").addOption("--retries", 3).addOption("--fragment-retries", 3)
                     .addOption("--newline")
                     .addOption("--write-info-json")
@@ -234,6 +240,7 @@ class DownloadService : Service() {
             DownloadStore.get(this, id)?.let { DownloadNotifications.result(this, it) }
         } finally {
             BrowserCookies.release(cookies)
+            if(DownloadStore.get(this,id)?.optString("state") in listOf(null,"complete","cancelled"))FacebookMedia.remove(this,job.optString("facebookMediaKey"))
             if (DownloadStore.get(this, id)?.optString("state") in listOf(null, "complete", "cancelled")) dir.deleteRecursively()
             synchronized(cancelled) { cancelled.remove(id) }
         }

@@ -31,6 +31,7 @@ class DownloadFlowInstrumentation : Instrumentation() {
         try {
             when (phase) {
                 "facebook-session" -> facebookSession()
+                "facebook-media" -> facebookMedia()
                 "spotify-history" -> spotifyHistory()
                 "bulk-selection" -> bulkSelection()
                 "app-updates" -> appUpdates()
@@ -65,6 +66,59 @@ class DownloadFlowInstrumentation : Instrumentation() {
         }
     }
     private fun check(name: String, condition: Boolean) { if (!condition) error(name); checks.put(name) }
+    private fun facebookMedia() {
+        launch("",false)
+        val rawFile=File(targetContext.getExternalFilesDir(null),"tests-030/facebook-live-video.json")
+        check("Private live-video fixture is present",rawFile.isFile)
+        val raw=JSONObject(rawFile.readText())
+        val url="https://www.facebook.com/example/posts/123456/"
+        val media=JSONObject().put("media",raw)
+        val attached=JSONObject().put("node_v2",JSONObject().put("comet_sections",JSONObject().put("content",JSONObject().put("story",JSONObject().put("attached_story",JSONObject().put("attachments",JSONArray().put(JSONObject().put("styles",JSONObject().put("attachment",media)))))))))
+        attached.put("recommendations",JSONArray().put(JSONObject(raw.toString()).put("id","999999999999").put("permalink_url","https://www.facebook.com/reel/999999999999/")))
+        val page=FacebookSession.resolvePage(targetContext,url,{true}) { v,_ ->
+            v.loadDataWithBaseURL(url,"<html><head><link rel='canonical' href='$url'></head><body><script type='application/json'>${attached}</script></body></html>","text/html","UTF-8",null)
+        }
+        check("Browser selects node_v2 shared video instead of a recommendation",page.media?.getString("id")==raw.getString("id"))
+        val info=page.media?:error("No browser media")
+        val mapped=FacebookMedia.videoInfo(info)
+        check("Actual browser manifest offers 1080p",Quality.offered(mapped.formats).any{it.height==1080&&it.width==1920})
+        check("Separate source audio is retained",mapped.formats.orEmpty().any{it.vcodec=="none"&&it.acodec!="none"})
+        check("Duration survives native metadata mapping",mapped.duration in 24..25)
+        check("Media metadata has no cookie header",!info.getJSONObject("http_headers").has("Cookie"))
+        val bad=JSONObject(info.toString());bad.getJSONArray("formats").getJSONObject(0).put("url","https://fbcdn.net.example.org/private")
+        val sanitized=FacebookMedia.validate(bad,url)!!
+        check("Unrelated hosts are removed from browser media",sanitized.getJSONArray("formats").length()==info.getJSONArray("formats").length()-1)
+        check("Local-file media URL rejected",!FacebookMedia.safeUrl("file:///data/user/0/com.quartz.downloader/private"))
+        check("HTTP media URL rejected",!FacebookMedia.safeUrl("http://video.fbcdn.net/test.mp4"))
+        check("Metadata file path traversal rejected",FacebookMedia.file(targetContext,"../../private")==null)
+        runOnMainSync {
+            fun set(name:String,value:Any){MainActivity::class.java.getDeclaredField(name).apply{isAccessible=true}.set(activity,value)}
+            set("previewUrl",url);set("previewResolvedUrl",page.url);set("previewFacebookMedia",info)
+            set("previewHeights",setOf(1080));set("previewTitle",mapped.title?:"Facebook video");set("previewThumbnail",mapped.thumbnail.orEmpty())
+            set("previewDuration",mapped.duration);set("previewRoute",FacebookMedia.ROUTE)
+            set("previewAudioAvailable",true);set("previewVideoAvailable",true)
+        }
+        val qualities=JSONArray().put(JSONObject().put("height",1080).put("width",1920).put("fps",0))
+        val preview=JSONObject().put("url",url).put("title",mapped.title).put("duration",mapped.duration).put("qualities",qualities).put("thumbnail","").put("hasVideo",true).put("hasAudio",true)
+        js("document.getElementById('link').value=${JSONObject.quote(url)};DownloadSheet.shared(${JSONObject.quote(url)});Quartz.receive('preview',$preview)")
+        check("Browser media renders usable options",js("document.getElementById('download-sheet').open&&!document.getElementById('download-sheet-confirm').disabled")=="true")
+        js("document.querySelector('.download-more').click();document.querySelector('[data-option=\"video:1080\"]').click()")
+        screenshot("facebook-browser-1080-options")
+        val old=DownloadStore.all(targetContext).let{rows->(0 until rows.length()).map{rows.getJSONObject(it).getString("id")}.toSet()}
+        js("document.getElementById('download-sheet-confirm').click()")
+        var row:JSONObject?=null
+        waitUntil(300){val rows=DownloadStore.all(targetContext);row=(0 until rows.length()).map{rows.getJSONObject(it)}.firstOrNull{it.getString("id") !in old&&it.optString("state") in listOf("complete","failed")};row!=null}
+        save("facebook-download-summary.json",JSONObject().put("state",row!!.optString("state")).put("message",row!!.optString("message")).put("quality",row!!.optString("quality")))
+        check("Actual Facebook 1080p video download completes",row!!.optString("state")=="complete")
+        val meta=android.media.MediaMetadataRetriever()
+        meta.setDataSource(targetContext,android.net.Uri.parse(row!!.getString("uri")))
+        try {
+            check("Saved Facebook video is genuinely 1080p",meta.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)=="1080")
+            check("Saved Facebook video contains audio",meta.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)=="yes")
+            check("Saved Facebook video has expected duration",meta.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong() in 24000..25000)
+        }finally{meta.release()}
+        targetContext.contentResolver.openInputStream(android.net.Uri.parse(row!!.getString("uri")))!!.use{input->File(evidence,"verified-facebook-1080.mp4").outputStream().use{input.copyTo(it)}}
+    }
     private fun facebookSession() {
         launch("",false)
         check("Facebook host accepted", UrlPolicy.isFacebook("https://m.facebook.com/share/abc/"))
