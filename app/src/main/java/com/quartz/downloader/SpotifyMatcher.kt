@@ -31,7 +31,7 @@ object SpotifyMatcher {
         val request = YoutubeDLRequest("ytsearch5:$query").addOption("--flat-playlist").addOption("--dump-single-json")
             .addOption("--skip-download").addOption("--no-warnings").addOption("--socket-timeout", 20)
             .addOption("--retries", 1).addOption("--extractor-retries", 1)
-        val response = YoutubeDL.execute(request, processId)
+        val response = MediaEngine.execute(request, processId)
         val entries = JSONObject(response.out).optJSONArray("entries") ?: JSONArray()
         val ranked = (0 until entries.length()).mapNotNull { index ->
             val candidate = entries.optJSONObject(index) ?: return@mapNotNull null

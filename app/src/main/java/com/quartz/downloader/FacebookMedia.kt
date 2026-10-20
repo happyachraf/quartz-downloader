@@ -12,6 +12,7 @@ import java.util.UUID
 
 /** Only media delivery data is retained. Account cookies and page HTML are never stored here. */
 object FacebookMedia {
+    private val mapper = ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,false)
     const val ROUTE = "facebook-browser-media"
     private val keyPattern = Regex("[a-f0-9-]{36}")
     fun safeUrl(raw: String): Boolean {
@@ -44,7 +45,7 @@ object FacebookMedia {
             .put("webpage_url","https://www.facebook.com/watch/?v=$id").put("extractor","facebook:browser").put("extractor_key","FacebookBrowser")
             .put("http_headers",headers).put("formats",rows)
     }
-    fun videoInfo(info: JSONObject): VideoInfo = ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,false).readValue(info.toString(),VideoInfo::class.java)
+    fun videoInfo(info: JSONObject): VideoInfo = mapper.readValue(info.toString(),VideoInfo::class.java)
     fun save(context: Context, info: JSONObject, existing: String = ""): String {
         val folder=File(context.filesDir,"facebook-media").apply{mkdirs()}
         folder.listFiles()?.filter { System.currentTimeMillis()-it.lastModified()>24*60*60*1000L }?.forEach{it.delete()}

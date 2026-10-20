@@ -63,7 +63,7 @@
     const video = section('Video'), all = data.qualities || [];
     const resolution=q=>{const h=Math.min(q.width||q.height,q.height);return h+'p'+(q.fps>30?q.fps:'')};
     row(video, 'video:best', 'Best available' + (all.length ? ' · '+resolution(all[0]) : ''), '', all[0]?.bytes, false);
-    const short = all.filter(q => [360,720].includes(Math.min(q.width || q.height,q.height)));
+    const short = all.filter((q,i) => i===0 || [360,720].includes(Math.min(q.width || q.height,q.height)));
     const shown = expanded ? all : all.filter(q=>short.includes(q)||selected==='video:'+q.height);
     shown.forEach(q => row(video,'video:'+q.height,resolution(q),expanded?qualityDescription(q):'',q.bytes,false));
     if (all.some(q => !short.includes(q))) {

@@ -30,6 +30,8 @@ class DownloadFlowInstrumentation : Instrumentation() {
         evidence = File(targetContext.getExternalFilesDir(null), "tests-030").apply { mkdirs() }
         try {
             when (phase) {
+                "youtube-quality" -> youtubeQuality()
+                "youtube-speed" -> youtubeSpeed()
                 "parallel-downloads" -> parallelDownloads()
                 "fast-matching" -> fastMatching()
                 "facebook-session" -> facebookSession()
@@ -68,6 +70,128 @@ class DownloadFlowInstrumentation : Instrumentation() {
         }
     }
     private fun check(name: String, condition: Boolean) { if (!condition) error(name); checks.put(name) }
+    private fun youtubeSpeed() {
+        launch("", false)
+        val timings = JSONArray()
+        val url = "https://youtu.be/ADy6IeLCoeo"
+        for (link in listOf(url, "https://youtu.be/2z6pCa_xehY")) {
+            PreviewCache.clear()
+            val start = android.os.SystemClock.elapsedRealtime()
+            js("document.getElementById('link').value=${JSONObject.quote(link)};inspect(true)")
+            ready()
+            val elapsed = android.os.SystemClock.elapsedRealtime() - start
+            check("${link.substringAfterLast('/')} finds real 1440p using buffered metadata", js("qualities.some(q=>q.height===1440)") == "true")
+            check("${link.substringAfterLast('/')} exposes 1440p immediately", js("!!document.querySelector('[data-option=\"video:1440\"]')") == "true")
+            val cachedStart = android.os.SystemClock.elapsedRealtime()
+            js("Quartz.back();inspect(true)"); ready()
+            val repeated = android.os.SystemClock.elapsedRealtime() - cachedStart
+            check("${link.substringAfterLast('/')} repeated lookup uses the saved HD preview", repeated < elapsed)
+            timings.put(JSONObject().put("url", link).put("lookupMs", elapsed).put("repeatLookupMs", repeated))
+            if (link == url) screenshot("youtube-1440-final-options")
+            js("Quartz.back()")
+        }
+        save("youtube-speed-timings.json", timings)
+        val info = PreviewCache.get(url) ?: run {
+            MediaEngine.prepare(targetContext)
+            ExtractorRoutes.inspect(url, null)
+        }
+        val folder = File(targetContext.cacheDir, "youtube-sample-${java.util.UUID.randomUUID()}").apply { mkdirs() }
+        val key = PreviewCache.save(targetContext, info.raw)
+        try {
+            val file = PreviewCache.file(targetContext, key)!!
+            MediaEngine.execute(com.yausername.youtubedl_android.YoutubeDLRequest(emptyList<String>())
+                .addOption("--load-info-json", file.absolutePath).addOption("--download-sections", "*0-8")
+                .addOption("-f", Quality.selector("1440")).addOption("--merge-output-format", "mp4")
+                .addOption("-o", File(folder, "sample.%(ext)s").absolutePath), "youtube-speed-sample")
+            val media = folder.listFiles()!!.first { it.extension == "mp4" && it.length() > 0 }
+            val metadata = android.media.MediaMetadataRetriever()
+            try {
+                metadata.setDataSource(media.absolutePath)
+                check("Buffered metadata starts a genuine 1440p sample download", metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT) == "1440")
+                check("Fresh 1440p sample includes sound", metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) == "yes")
+                check("Sample contains the requested video section", metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong() in 5000..15000)
+            } finally { metadata.release() }
+        } finally { PreviewCache.remove(targetContext, key); folder.deleteRecursively() }
+        check("Temporary inspection files are cleared", File(targetContext.cacheDir, "inspection").listFiles().orEmpty().isEmpty())
+        check("Legacy default jobs prefer the fast YouTube route", ExtractorRoutes.candidates(url, ExtractorRoutes.DEFAULT).first() == ExtractorRoutes.YOUTUBE_FAST)
+        check("Embedded HD fallback is retained", ExtractorRoutes.YOUTUBE_EMBEDDED in ExtractorRoutes.candidates(url))
+    }
+    private fun youtubeQuality() {
+        val url = "https://youtu.be/ADy6IeLCoeo"
+        val enginePrefs = targetContext.getSharedPreferences("quartz_engine", 0)
+        enginePrefs.edit().putLong("lastSuccessfulUpdate", 0).putLong("lastUpdateAttempt", 0).commit()
+        val initStart = android.os.SystemClock.elapsedRealtime()
+        MediaEngine.prepare(targetContext)
+        val initMs = android.os.SystemClock.elapsedRealtime() - initStart
+        check("Extractor initialization does not wait for network updates", initMs < 2000)
+        PreviewCache.clear()
+        val timings = JSONArray()
+        var downloadId = ""
+        try {
+            val start = android.os.SystemClock.elapsedRealtime()
+            launch(url); ready()
+            val firstMs = android.os.SystemClock.elapsedRealtime() - start
+            check("Exact reported video offers genuine 1440p", js("qualities.some(q=>q.height===1440)") == "true")
+            check("1440p option is present without More formats", js("!!document.querySelector('[data-option=\"video:1440\"]')") == "true")
+            check("Best available identifies the highest resolution", js("document.querySelector('[data-option=\"video:best\"]').textContent.includes('1440p')") == "true")
+            screenshot("youtube-1440-immediate-options")
+            timings.put(JSONObject().put("url", url).put("firstShareToOptionsMs", firstMs).put("enginePrepareMs", initMs))
+            val old = DownloadStore.all(targetContext).let { rows -> (0 until rows.length()).map { rows.getJSONObject(it).getString("id") }.toSet() }
+            js("document.querySelector('[data-option=\"video:1440\"]').click();document.getElementById('download-sheet-confirm').click()")
+            waitUntil(15) {
+                val rows = DownloadStore.all(targetContext)
+                downloadId = (0 until rows.length()).map { rows.getJSONObject(it) }.firstOrNull { it.optString("id") !in old }?.optString("id").orEmpty()
+                downloadId.isNotBlank()
+            }
+            val queued = DownloadStore.get(targetContext, downloadId)!!
+            check("Download retains 1440p choice and preview media", queued.optString("quality") == "1440" && queued.optString("mediaInfoKey").isNotBlank())
+            waitUntil(30) { shell("ps -A -o ARGS").toString(Charsets.UTF_8).contains("preview-media/${queued.optString("mediaInfoKey")}.json") || DownloadStore.get(targetContext, downloadId)?.optString("state") == "complete" }
+            check("Download reuses extracted formats instead of looking up the video again", queued.optString("extractorRoute") == ExtractorRoutes.YOUTUBE_FAST)
+            val cachedStart = android.os.SystemClock.elapsedRealtime()
+            launch("https://www.youtube.com/watch?v=ADy6IeLCoeo"); ready()
+            val cachedMs = android.os.SystemClock.elapsedRealtime() - cachedStart
+            check("Repeated share reuses HD results across equivalent YouTube links", cachedMs < firstMs && js("qualities.some(q=>q.height===1440)") == "true")
+            timings.getJSONObject(0).put("repeatShareToOptionsMs", cachedMs)
+            PreviewCache.clear()
+            val earlierStart = android.os.SystemClock.elapsedRealtime()
+            launch("https://youtu.be/2z6pCa_xehY"); ready()
+            check("Earlier reported video still reveals 1440p60", js("qualities.some(q=>q.height===1440&&q.fps===60)") == "true")
+            timings.put(JSONObject().put("url", "https://youtu.be/2z6pCa_xehY").put("firstShareToOptionsMs", android.os.SystemClock.elapsedRealtime() - earlierStart))
+            check("Preview media paths reject traversal", PreviewCache.file(targetContext, "../../private") == null)
+            save("youtube-lookup-timings.json", timings)
+            launch("", false); js("AppUI.navigate('downloads');refresh()")
+            waitUntil(900) { DownloadStore.get(targetContext, downloadId)?.optString("state") in listOf("complete", "failed") }
+            val result = DownloadStore.get(targetContext, downloadId)!!
+            save("youtube-1440-download.json", JSONObject().put("url", url).put("state", result.optString("state")).put("quality", result.optString("quality")).put("message", result.optString("message")))
+            check("Exact user video completes an actual 1440p download", result.optString("state") == "complete")
+            val uri = android.net.Uri.parse(result.getString("uri"))
+            val metadata = android.media.MediaMetadataRetriever()
+            try {
+                metadata.setDataSource(targetContext, uri)
+                check("Saved file is 2560 by 1440", metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT) == "1440" && metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH) == "2560")
+                check("1440p download includes its audio", metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) == "yes")
+                check("Saved video has the complete expected duration", metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong() in 639000..642000)
+            } finally { metadata.release() }
+            val audio = android.media.MediaExtractor()
+            try {
+                audio.setDataSource(targetContext, uri, null)
+                val index = (0 until audio.trackCount).first { audio.getTrackFormat(it).getString(android.media.MediaFormat.KEY_MIME)?.startsWith("audio/") == true }
+                audio.selectTrack(index)
+                check("Saved audio track contains actual encoded samples", audio.readSampleData(java.nio.ByteBuffer.allocate(65536), 0) > 0)
+            } finally { audio.release() }
+            check("Private preview media is removed after completion", PreviewCache.file(targetContext, queued.optString("mediaInfoKey")) == null)
+        } finally {
+            if (downloadId.isNotBlank()) {
+                if (DownloadService.active) {
+                    runOnMainSync { targetContext.startForegroundService(Intent(targetContext, DownloadService::class.java).setAction(DownloadService.ACTION_PAUSE).putExtra(DownloadService.EXTRA_ID, downloadId)) }
+                    waitUntil(30) { !DownloadService.active }
+                }
+                DownloadStore.get(targetContext, downloadId)?.optString("uri")?.takeIf { it.isNotBlank() }?.let { targetContext.contentResolver.delete(android.net.Uri.parse(it), null, null) }
+                DownloadStore.remove(targetContext, downloadId); DownloadNotifications.dismiss(targetContext, downloadId)
+                File(targetContext.filesDir, "working/$downloadId").deleteRecursively()
+            }
+        }
+    }
     private fun parallelDownloads() {
         launch("", false)
         check("Existing background work is idle before isolated test", !DownloadService.active && !SpotifyService.active)
@@ -181,7 +305,9 @@ class DownloadFlowInstrumentation : Instrumentation() {
             var overlapping = false
             waitUntil(180) {
                 if (processes() >= 2) overlapping = true
-                PlaylistStore.getFor(targetContext, url)?.optString("status") == "ready"
+                val saved = PlaylistStore.getFor(targetContext, url)
+                val searched = saved?.optJSONArray("tracks")
+                saved?.optString("status") == "ready" && searched != null && (0 until searched.length()).all { searched.getJSONObject(it).optBoolean("searched") }
             }
             val firstMillis = android.os.SystemClock.elapsedRealtime() - start
             val found = PlaylistStore.getFor(targetContext, url)!!.getJSONArray("tracks")

@@ -29,12 +29,16 @@ import java.util.concurrent.atomic.AtomicLong
 open class MainActivity : Activity() {
     protected open val shareOnly = false
     private lateinit var web: WebView
-    private val worker = Executors.newSingleThreadExecutor()
+    private val worker = Executors.newFixedThreadPool(2)
     @Volatile private var pageReady = false
     @Volatile private var pendingLink = ""
     @Volatile private var previewUrl = ""
     @Volatile private var previewResolvedUrl = ""
     @Volatile private var previewFacebookMedia: JSONObject? = null
+    @Volatile private var previewYoutubeMedia: JSONObject? = null
+    @Volatile private var previewProcessId = ""
+    @Volatile private var inspectingUrl = ""
+    @Volatile private var inspectingGeneration = -1L
     @Volatile private var previewHeights = emptySet<Int>()
     @Volatile private var previewTitle = ""
     @Volatile private var previewThumbnail = ""
@@ -124,6 +128,8 @@ open class MainActivity : Activity() {
         if (raw.isNullOrBlank()) return
         val found = Regex("https://[^\\s<>]+", RegexOption.IGNORE_CASE).find(raw)?.value?.trimEnd('.', ',', ')') ?: raw
         pendingLink = found
+        // Start shared YouTube discovery while the options screen is loading.
+        if (!pageReady && UrlPolicy.isYoutube(found)) Bridge().inspect(found)
         if (pageReady) { send("sharedLink", JSONObject().put("url", found).put("popup", true)); pendingLink = "" }
     }
 
@@ -179,10 +185,16 @@ open class MainActivity : Activity() {
         @JavascriptInterface fun inspect(raw: String) {
             val url = try { UrlPolicy.normalize(raw) } catch (e: Exception) { error(e.message ?: "Paste a complete link."); return }
             if (UrlPolicy.isSpotify(url)) { previewGeneration.incrementAndGet(); previewUrl = ""; loadPlaylist(url); return }
+            if (inspectingUrl == url && inspectingGeneration == previewGeneration.get()) return
+            inspectingUrl = url
             lastFacebookLink = url.takeIf { UrlPolicy.isFacebook(it) }.orEmpty()
             val generation = previewGeneration.incrementAndGet()
+            inspectingGeneration = generation
+            previewProcessId.takeIf { it.isNotBlank() }?.let { YoutubeDL.destroyProcessById(it) }
+            val processId = "preview-${UUID.randomUUID()}"; previewProcessId = processId
             previewUrl = ""
             previewFacebookMedia = null
+            previewYoutubeMedia = null
             send("previewLoading", JSONObject().put("url", url).put("message", if (UrlPolicy.isFacebook(url)) "Opening Facebook with your saved session…" else "Finding available video formats…"))
             worker.execute {
                 var cookies: File? = null
@@ -192,14 +204,19 @@ open class MainActivity : Activity() {
                     if (generation != previewGeneration.get()) return@execute
                     MediaEngine.prepare(this@MainActivity)
                     cookies = BrowserCookies.create(this@MainActivity, resolvedUrl)
-                    val (info, route) = facebook?.media?.let { FacebookMedia.videoInfo(it) to FacebookMedia.ROUTE }
-                        ?: ExtractorRoutes.inspect(resolvedUrl, cookies, facebook?.userAgent.orEmpty())
+                    val inspection = facebook?.media?.let { MediaInspection(FacebookMedia.videoInfo(it), FacebookMedia.ROUTE, it) }
+                        ?: ExtractorRoutes.inspect(resolvedUrl, cookies, facebook?.userAgent.orEmpty(), processId,
+                            { generation == previewGeneration.get() }) { message ->
+                            if (generation == previewGeneration.get()) send("previewLoading", JSONObject().put("url", url).put("message", message))
+                        }
+                    val (info, route) = inspection
                     val qualities = Quality.offered(info.formats, UrlPolicy.isTikTok(url))
                     if (UrlPolicy.isTikTok(url) && qualities.isEmpty()) throw IllegalStateException("No clean TikTok format")
                     if (generation != previewGeneration.get()) return@execute
                     previewUrl = url
                     previewResolvedUrl = resolvedUrl
                     previewFacebookMedia = facebook?.media
+                    previewYoutubeMedia = inspection.raw.takeIf { UrlPolicy.isYoutube(url) }
                     previewHeights = qualities.map { it.height }.toSet()
                     previewTitle = info.title ?: info.fulltitle ?: "Untitled video"
                     previewThumbnail = info.thumbnail.orEmpty()
@@ -240,6 +257,7 @@ open class MainActivity : Activity() {
                     })
                 } finally {
                     BrowserCookies.release(cookies)
+                    if (generation == previewGeneration.get()) inspectingUrl = ""
                 }
             }
         }
@@ -253,9 +271,11 @@ open class MainActivity : Activity() {
             }
             val id = UUID.randomUUID().toString()
             val facebookKey=previewFacebookMedia?.let{FacebookMedia.save(this@MainActivity,it)}.orEmpty()
+            val mediaInfoKey=previewYoutubeMedia?.let{PreviewCache.save(this@MainActivity,it)}.orEmpty()
             val job = JSONObject().put("id", id).put("url", url).put("mode", mode)
                 .put("resolvedUrl", previewResolvedUrl)
                 .put("facebookMediaKey", facebookKey)
+                .put("mediaInfoKey", mediaInfoKey)
                 .put("quality", if (mode == "audio") "best" else choice)
                 .put("extractorRoute", previewRoute)
                 .put("selector", previewTikTokChoices[choice] ?: "")
@@ -575,6 +595,7 @@ open class MainActivity : Activity() {
     override fun onDestroy() {
         pageReady = false
         previewGeneration.incrementAndGet()
+        previewProcessId.takeIf { it.isNotBlank() }?.let { YoutubeDL.destroyProcessById(it) }
         worker.shutdownNow()
         web.removeJavascriptInterface("QuartzNative")
         web.destroy()

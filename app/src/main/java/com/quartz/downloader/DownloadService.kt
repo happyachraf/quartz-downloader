@@ -117,7 +117,7 @@ class DownloadService : Service() {
             if (mode == "audio") DownloadStore.update(this, id, JSONObject().put("audioFormat", audioFormat).put("audioQuality", if (audioFormat == "mp3") 320 else 0))
             DownloadStore.update(this, id, JSONObject().put("state", "preparing").put("message", if (UrlPolicy.isFacebook(url)) "Opening Facebook with your saved session…" else "Preparing media tools…"))
             refreshProgress()
-            var browserInfo = FacebookMedia.file(this,job.optString("facebookMediaKey"))
+            var browserInfo = FacebookMedia.file(this,job.optString("facebookMediaKey")) ?: PreviewCache.file(this,job.optString("mediaInfoKey"))
             val facebook = if (UrlPolicy.isFacebook(url) && browserInfo==null) FacebookSession.resolve(this, url) {
                 !synchronized(cancelled) { id in cancelled } && !Thread.currentThread().isInterrupted
             } else null
@@ -182,13 +182,19 @@ class DownloadService : Service() {
                     DownloadStore.update(this, id, JSONObject().put("message", "Trying X's public video endpoint…"))
                 }
                 try {
-                    result = YoutubeDL.execute(request(route), id, callback)
+                    result = MediaEngine.execute(request(route), id, callback)
                     DownloadStore.update(this, id, JSONObject().put("extractorRoute", route))
                     break
                 } catch (error: Exception) {
                     if (synchronized(cancelled) { id in cancelled } || error is InterruptedException || Thread.currentThread().isInterrupted) throw error
                     lastError = error
                     lastUpdate = 0
+                    if (UrlPolicy.isYoutube(url) && browserInfo != null) {
+                        // A preview URL can expire or be declined. The next route must fetch fresh streams.
+                        browserInfo = null
+                        PreviewCache.invalidate(url)
+                        PreviewCache.remove(this, job.optString("mediaInfoKey"))
+                    }
                     // Keep partial streams: yt-dlp resumes compatible files by format ID.
                 }
             }
@@ -244,6 +250,7 @@ class DownloadService : Service() {
         } finally {
             BrowserCookies.release(cookies)
             if(DownloadStore.get(this,id)?.optString("state") in listOf(null,"complete","cancelled"))FacebookMedia.remove(this,job.optString("facebookMediaKey"))
+            if(DownloadStore.get(this,id)?.optString("state") in listOf(null,"complete","cancelled"))PreviewCache.remove(this,job.optString("mediaInfoKey"))
             if (DownloadStore.get(this, id)?.optString("state") in listOf(null, "complete", "cancelled")) dir.deleteRecursively()
             synchronized(cancelled) { cancelled.remove(id) }
         }
