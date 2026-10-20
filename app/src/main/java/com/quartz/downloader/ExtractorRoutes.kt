@@ -46,7 +46,6 @@ object ExtractorRoutes {
 
     fun inspect(url: String, cookies: File?, userAgent: String = "", processId: String? = null,
                 allowed: () -> Boolean = { true }, status: (String) -> Unit = {}): MediaInspection {
-        if (UrlPolicy.isYoutube(url)) PreviewCache.get(url)?.let { return it }
         var lastError: Exception? = null
         var best: MediaInspection? = null
         val youtube = UrlPolicy.isYoutube(url)
@@ -65,7 +64,7 @@ object ExtractorRoutes {
                 if (!youtube) return next
                 if (best == null || height(next) > height(best!!)) best = next
                 // A successful 360p-only response is not evidence that HD is unavailable.
-                if (height(next) >= 720) { PreviewCache.put(url, next); return next }
+                if (height(next) >= 720) return next
             }
             catch (error: Exception) {
                 if (error is InterruptedException || Thread.currentThread().isInterrupted) throw error

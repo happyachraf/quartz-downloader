@@ -271,7 +271,7 @@ open class MainActivity : Activity() {
             }
             val id = UUID.randomUUID().toString()
             val facebookKey=previewFacebookMedia?.let{FacebookMedia.save(this@MainActivity,it)}.orEmpty()
-            val mediaInfoKey=previewYoutubeMedia?.let{PreviewCache.save(this@MainActivity,it)}.orEmpty()
+            val mediaInfoKey=previewYoutubeMedia?.let{DownloadMediaInfo.save(this@MainActivity,it)}.orEmpty()
             val job = JSONObject().put("id", id).put("url", url).put("mode", mode)
                 .put("resolvedUrl", previewResolvedUrl)
                 .put("facebookMediaKey", facebookKey)

@@ -19,7 +19,7 @@ Get the signed APK from [the latest release](https://github.com/happyachraf/quar
 - Download queue with 1, 2 or 3 simultaneous downloads (2 by default), individual foreground notifications, Pause/Resume and retained compatible partial downloads.
 - Public Spotify playlist metadata, two concurrent YouTube match searches, reusable seven-day search results across playlists, independent saved workspaces and audio downloads from reviewed matches.
 - Original source audio or 320 kbps MP3, with artwork and music tags when available.
-- Faster YouTube previews, HD recovery after low-resolution-only responses, five-minute preview reuse and no second extraction when fresh preview data can start the download.
+- YouTube lookups start during shared-link loading and recover HD after low-resolution-only responses. Each separate lookup gets fresh formats; its selected download can use those formats without a second extraction.
 - Music library, player, playlist groups, long-press selection, Select all and bulk removal.
 - GitHub-only app-update checks, checksum and original-signer validation, and Android installation confirmation.
 

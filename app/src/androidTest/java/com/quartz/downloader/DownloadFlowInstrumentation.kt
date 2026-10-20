@@ -74,31 +74,28 @@ class DownloadFlowInstrumentation : Instrumentation() {
         launch("", false)
         val timings = JSONArray()
         val url = "https://youtu.be/ADy6IeLCoeo"
+        var selectedMedia: JSONObject? = null
         for (link in listOf(url, "https://youtu.be/2z6pCa_xehY")) {
-            PreviewCache.clear()
             val start = android.os.SystemClock.elapsedRealtime()
             js("document.getElementById('link').value=${JSONObject.quote(link)};inspect(true)")
             ready()
             val elapsed = android.os.SystemClock.elapsedRealtime() - start
             check("${link.substringAfterLast('/')} finds real 1440p using buffered metadata", js("qualities.some(q=>q.height===1440)") == "true")
             check("${link.substringAfterLast('/')} exposes 1440p immediately", js("!!document.querySelector('[data-option=\"video:1440\"]')") == "true")
-            val cachedStart = android.os.SystemClock.elapsedRealtime()
-            js("Quartz.back();inspect(true)"); ready()
-            val repeated = android.os.SystemClock.elapsedRealtime() - cachedStart
-            check("${link.substringAfterLast('/')} repeated lookup uses the saved HD preview", repeated < elapsed)
-            timings.put(JSONObject().put("url", link).put("lookupMs", elapsed).put("repeatLookupMs", repeated))
-            if (link == url) screenshot("youtube-1440-final-options")
+            timings.put(JSONObject().put("url", link).put("lookupMs", elapsed))
+            if (link == url) {
+                selectedMedia = MainActivity::class.java.getDeclaredField("previewYoutubeMedia").apply { isAccessible = true }.get(activity) as JSONObject
+                screenshot("youtube-1440-final-options")
+            }
             js("Quartz.back()")
         }
         save("youtube-speed-timings.json", timings)
-        val info = PreviewCache.get(url) ?: run {
-            MediaEngine.prepare(targetContext)
-            ExtractorRoutes.inspect(url, null)
-        }
         val folder = File(targetContext.cacheDir, "youtube-sample-${java.util.UUID.randomUUID()}").apply { mkdirs() }
-        val key = PreviewCache.save(targetContext, info.raw)
+        val key = DownloadMediaInfo.save(targetContext, selectedMedia!!)
         try {
-            val file = PreviewCache.file(targetContext, key)!!
+            val file = DownloadMediaInfo.file(targetContext, key)!!
+            check("Current preview metadata belongs to the chosen video", JSONObject(file.readText()).optString("id") == "ADy6IeLCoeo")
+            check("Preview media paths reject traversal", DownloadMediaInfo.file(targetContext, "../../private") == null)
             MediaEngine.execute(com.yausername.youtubedl_android.YoutubeDLRequest(emptyList<String>())
                 .addOption("--load-info-json", file.absolutePath).addOption("--download-sections", "*0-8")
                 .addOption("-f", Quality.selector("1440")).addOption("--merge-output-format", "mp4")
@@ -111,7 +108,8 @@ class DownloadFlowInstrumentation : Instrumentation() {
                 check("Fresh 1440p sample includes sound", metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) == "yes")
                 check("Sample contains the requested video section", metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong() in 5000..15000)
             } finally { metadata.release() }
-        } finally { PreviewCache.remove(targetContext, key); folder.deleteRecursively() }
+        } finally { DownloadMediaInfo.remove(targetContext, key); folder.deleteRecursively() }
+        check("Finished sample metadata is removed", DownloadMediaInfo.file(targetContext, key) == null)
         check("Temporary inspection files are cleared", File(targetContext.cacheDir, "inspection").listFiles().orEmpty().isEmpty())
         check("Legacy default jobs prefer the fast YouTube route", ExtractorRoutes.candidates(url, ExtractorRoutes.DEFAULT).first() == ExtractorRoutes.YOUTUBE_FAST)
         check("Embedded HD fallback is retained", ExtractorRoutes.YOUTUBE_EMBEDDED in ExtractorRoutes.candidates(url))
@@ -124,7 +122,6 @@ class DownloadFlowInstrumentation : Instrumentation() {
         MediaEngine.prepare(targetContext)
         val initMs = android.os.SystemClock.elapsedRealtime() - initStart
         check("Extractor initialization does not wait for network updates", initMs < 2000)
-        PreviewCache.clear()
         val timings = JSONArray()
         var downloadId = ""
         try {
@@ -147,17 +144,11 @@ class DownloadFlowInstrumentation : Instrumentation() {
             check("Download retains 1440p choice and preview media", queued.optString("quality") == "1440" && queued.optString("mediaInfoKey").isNotBlank())
             waitUntil(30) { shell("ps -A -o ARGS").toString(Charsets.UTF_8).contains("preview-media/${queued.optString("mediaInfoKey")}.json") || DownloadStore.get(targetContext, downloadId)?.optString("state") == "complete" }
             check("Download reuses extracted formats instead of looking up the video again", queued.optString("extractorRoute") == ExtractorRoutes.YOUTUBE_FAST)
-            val cachedStart = android.os.SystemClock.elapsedRealtime()
-            launch("https://www.youtube.com/watch?v=ADy6IeLCoeo"); ready()
-            val cachedMs = android.os.SystemClock.elapsedRealtime() - cachedStart
-            check("Repeated share reuses HD results across equivalent YouTube links", cachedMs < firstMs && js("qualities.some(q=>q.height===1440)") == "true")
-            timings.getJSONObject(0).put("repeatShareToOptionsMs", cachedMs)
-            PreviewCache.clear()
             val earlierStart = android.os.SystemClock.elapsedRealtime()
             launch("https://youtu.be/2z6pCa_xehY"); ready()
             check("Earlier reported video still reveals 1440p60", js("qualities.some(q=>q.height===1440&&q.fps===60)") == "true")
             timings.put(JSONObject().put("url", "https://youtu.be/2z6pCa_xehY").put("firstShareToOptionsMs", android.os.SystemClock.elapsedRealtime() - earlierStart))
-            check("Preview media paths reject traversal", PreviewCache.file(targetContext, "../../private") == null)
+            check("Preview media paths reject traversal", DownloadMediaInfo.file(targetContext, "../../private") == null)
             save("youtube-lookup-timings.json", timings)
             launch("", false); js("AppUI.navigate('downloads');refresh()")
             waitUntil(900) { DownloadStore.get(targetContext, downloadId)?.optString("state") in listOf("complete", "failed") }
@@ -179,7 +170,7 @@ class DownloadFlowInstrumentation : Instrumentation() {
                 audio.selectTrack(index)
                 check("Saved audio track contains actual encoded samples", audio.readSampleData(java.nio.ByteBuffer.allocate(65536), 0) > 0)
             } finally { audio.release() }
-            check("Private preview media is removed after completion", PreviewCache.file(targetContext, queued.optString("mediaInfoKey")) == null)
+            check("Private preview media is removed after completion", DownloadMediaInfo.file(targetContext, queued.optString("mediaInfoKey")) == null)
         } finally {
             if (downloadId.isNotBlank()) {
                 if (DownloadService.active) {
