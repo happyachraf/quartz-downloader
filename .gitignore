@@ -1,0 +1,14 @@
+.gradle/
+.gradle-home/
+build/
+app/build/
+local.properties
+signing/
+work/
+outputs/
+design-preview/
+.kotlin/
+.idea/
+*.p12
+*.keystore
+*.jks

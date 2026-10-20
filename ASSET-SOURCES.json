@@ -1,0 +1,138 @@
+[
+  {
+    "asset": "home.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/action/home/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "download.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/file/download/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "music_note.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/image/music_note/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "settings.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/action/settings/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "search.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/action/search/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "close.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/navigation/close/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "more_vert.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/navigation/more_vert/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "play_arrow.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/av/play_arrow/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "pause.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/av/pause/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "skip_next.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/av/skip_next/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "skip_previous.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/av/skip_previous/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "arrow_back.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/navigation/arrow_back/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "refresh.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/navigation/refresh/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "lock.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/action/lock/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "link.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/content/link/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "chevron_right.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/navigation/chevron_right/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "notifications.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/social/notifications/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "queue_music.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/av/queue_music/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "check.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/navigation/check/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "expand_more.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/navigation/expand_more/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "content_copy.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/content/content_copy/materialiconsround/24px.svg"
+  },
+  {
+    "asset": "site-youtube.svg",
+    "url": "https://raw.githubusercontent.com/simple-icons/simple-icons/develop/icons/youtube.svg"
+  },
+  {
+    "asset": "site-tiktok.svg",
+    "url": "https://raw.githubusercontent.com/simple-icons/simple-icons/develop/icons/tiktok.svg"
+  },
+  {
+    "asset": "site-x.svg",
+    "url": "https://raw.githubusercontent.com/simple-icons/simple-icons/develop/icons/x.svg"
+  },
+  {
+    "asset": "site-facebook.svg",
+    "url": "https://raw.githubusercontent.com/simple-icons/simple-icons/develop/icons/facebook.svg"
+  },
+  {
+    "asset": "site-instagram.svg",
+    "url": "https://raw.githubusercontent.com/simple-icons/simple-icons/develop/icons/instagram.svg"
+  },
+  {
+    "asset": "home-outline.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/action/home/materialiconsoutlined/24px.svg"
+  },
+  {
+    "asset": "download-outline.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/file/download/materialiconsoutlined/24px.svg"
+  },
+  {
+    "asset": "settings-outline.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/action/settings/materialiconsoutlined/24px.svg"
+  },
+  {
+    "asset": "search-outline.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/action/search/materialiconsoutlined/24px.svg"
+  },
+  {
+    "asset": "notifications-outline.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/social/notifications/materialiconsoutlined/24px.svg"
+  },
+  {
+    "asset": "queue_music-outline.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/av/queue_music/materialiconsoutlined/24px.svg"
+  },
+  {
+    "asset": "folder-outline.svg",
+    "url": "https://raw.githubusercontent.com/google/material-design-icons/master/src/file/folder/materialiconsoutlined/24px.svg"
+  },
+  {
+    "asset": "site-spotify.svg",
+    "url": "https://cdn.jsdelivr.net/npm/simple-icons@v15/icons/spotify.svg"
+  }
+]
