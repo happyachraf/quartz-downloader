@@ -36,6 +36,7 @@ open class MainActivity : Activity() {
     @Volatile private var previewResolvedUrl = ""
     @Volatile private var previewFacebookMedia: JSONObject? = null
     @Volatile private var previewYoutubeMedia: JSONObject? = null
+    @Volatile private var previewSpotifyTrack: JSONObject? = null
     @Volatile private var previewProcessId = ""
     @Volatile private var inspectingUrl = ""
     @Volatile private var inspectingGeneration = -1L
@@ -184,7 +185,7 @@ open class MainActivity : Activity() {
 
         @JavascriptInterface fun inspect(raw: String) {
             val url = try { UrlPolicy.normalize(raw) } catch (e: Exception) { error(e.message ?: "Paste a complete link."); return }
-            if (UrlPolicy.isSpotify(url)) { previewGeneration.incrementAndGet(); previewUrl = ""; loadPlaylist(url); return }
+            if (UrlPolicy.isSpotify(url) && !SpotifyCatalog.isTrack(url)) { previewGeneration.incrementAndGet(); previewUrl = ""; previewSpotifyTrack = null; loadPlaylist(url); return }
             if (inspectingUrl == url && inspectingGeneration == previewGeneration.get()) return
             inspectingUrl = url
             lastFacebookLink = url.takeIf { UrlPolicy.isFacebook(it) }.orEmpty()
@@ -195,10 +196,33 @@ open class MainActivity : Activity() {
             previewUrl = ""
             previewFacebookMedia = null
             previewYoutubeMedia = null
+            previewSpotifyTrack = null
             send("previewLoading", JSONObject().put("url", url).put("message", if (UrlPolicy.isFacebook(url)) "Opening Facebook with your saved session…" else "Finding available video formats…"))
             worker.execute {
                 var cookies: File? = null
                 try {
+                    if (UrlPolicy.isSpotify(url)) {
+                        val track = SpotifyCatalog.loadTrack(url)
+                        if (generation != previewGeneration.get()) return@execute
+                        send("previewLoading", JSONObject().put("url", url).put("message", "Finding an audio match for ${track.getString("name")}…"))
+                        MediaEngine.prepare(this@MainActivity)
+                        val matches = SpotifyMatcher.find(track, processId, this@MainActivity) { generation == previewGeneration.get() }
+                        if (generation != previewGeneration.get()) return@execute
+                        require(matches.length() > 0) { "No audio match found for this song. Try again later." }
+                        val best = matches.getJSONObject(0)
+                        val strong = best.optDouble("score") >= .82 && best.optDouble("duration") > 0
+                        track.put("candidates", matches).put("selectedUrl", if (strong) best.getString("url") else "")
+                        previewSpotifyTrack = track
+                        previewUrl = url
+                        previewAudioAvailable = true; previewVideoAvailable = false; previewHeights = emptySet()
+                        previewTitle = track.getString("name")
+                        send("preview", JSONObject().put("url", url).put("title", track.getString("name"))
+                            .put("artist", (0 until track.getJSONArray("artists").length()).joinToString(", ") { track.getJSONArray("artists").getString(it) })
+                            .put("thumbnail", track.optString("thumbnail")).put("duration", track.optDouble("duration"))
+                            .put("qualities", JSONArray()).put("hasAudio", true).put("hasVideo", false)
+                            .put("spotifyTrack", true).put("matches", matches).put("selectedMatch", track.optString("selectedUrl")))
+                        return@execute
+                    }
                     val facebook = if (UrlPolicy.isFacebook(url)) FacebookSession.resolve(this@MainActivity, url) { generation == previewGeneration.get() } else null
                     val resolvedUrl = facebook?.url ?: url
                     if (generation != previewGeneration.get()) return@execute
@@ -250,6 +274,7 @@ open class MainActivity : Activity() {
                         return@execute
                     }
                     error(when {
+                        UrlPolicy.isSpotify(url) -> e.message?.takeIf { it.contains("song") || it.contains("Spotify") } ?: "Could not load this Spotify song. Check your connection and try again."
                         e.message?.contains("No clean TikTok", true) == true -> "TikTok did not offer a video without a watermark for this link."
                         Regex("no address associated|unable to resolve|network is unreachable|timed out", RegexOption.IGNORE_CASE).containsMatchIn(e.message.orEmpty()) -> "Quartz could not reach this website. Check your internet connection and try again."
                         e.message?.contains("sign in", true) == true || e.message?.contains("login", true) == true -> "This website asks for a login. Use the sign-in buttons in Settings, or open the page in Quartz's browser and tap Use link."
@@ -264,6 +289,7 @@ open class MainActivity : Activity() {
 
         @JavascriptInterface fun download(rawUrl: String, choice: String, mode: String, audioFormat: String) {
             val url = try { UrlPolicy.normalize(rawUrl) } catch (e: Exception) { error(e.message ?: "Invalid link"); return }
+            if (UrlPolicy.isSpotify(url)) { error("Choose an audio match for this Spotify song first."); return }
             if(url==previewUrl && ((mode=="audio"&&!previewAudioAvailable)||(mode=="video"&&!previewVideoAvailable))){error(if(mode=="audio") "This video has no audio stream. Choose video instead." else "This link offers audio only. Choose an audio format.");return}
             if (url != previewUrl || mode !in listOf("video", "audio") || audioFormat !in listOf("original", "mp3") || (mode == "video" && choice != "best" && choice.toIntOrNull() !in previewHeights)) {
                 error("Preview this link and choose one of its available qualities first.")
@@ -290,6 +316,7 @@ open class MainActivity : Activity() {
 
         @JavascriptInterface fun loadPlaylist(raw: String) {
             val url = try { SpotifyCatalog.normalize(raw) } catch (e: Exception) { error(e.message ?: "Paste a Spotify playlist link."); return }
+            if (SpotifyCatalog.isTrack(url)) { send("sharedLink", JSONObject().put("url", url).put("popup", true)); return }
             PlaylistStore.select(this@MainActivity, url)
             if (PlaylistStore.getFor(this@MainActivity, url) == null) {
                 PlaylistStore.save(this@MainActivity, JSONObject().put("url", url).put("status", "loading").put("title", "Loading playlist…"))
@@ -353,43 +380,26 @@ open class MainActivity : Activity() {
             val chosen = (0 until keys.length()).map { keys.optString(it) }.toSet()
             val playlist = PlaylistStore.get(this@MainActivity)
             val tracks = playlist.optJSONArray("tracks") ?: return
-            val existing = DownloadStore.all(this@MainActivity)
-            val jobs = mutableListOf<JSONObject>()
-            val assigned = mutableMapOf<String, String>()
-            for (i in 0 until tracks.length()) {
-                val row = tracks.getJSONObject(i)
-                val key = row.optString("key")
-                if (key !in chosen) continue
-                val candidates = row.optJSONArray("candidates") ?: continue
-                val selected = (0 until candidates.length()).map { candidates.getJSONObject(it) }.find { it.optString("url") == row.optString("selectedUrl") } ?: continue
-                if (!row.optBoolean("confirmed") && (selected.optDouble("score") < .82 || selected.optDouble("duration") <= 0)) continue
-                val previous = (jobs + (0 until existing.length()).map { existing.getJSONObject(it) }).find {
-                    it.optString("spotifyTrackUri") == row.optString("uri") && it.optString("audioFormat", "mp3") == audioFormat &&
-                        (audioFormat == "original" || it.optInt("audioQuality") == 320) &&
-                        it.optString("state") in listOf("complete", "queued", "preparing", "downloading", "processing", "saving", "paused", "waiting")
-                }
-                if (previous != null) { assigned[key] = previous.getString("id"); continue }
-                val id = UUID.randomUUID().toString()
-                val artists = row.getJSONArray("artists")
-                val artistText = (0 until artists.length()).joinToString(", ") { artists.getString(it) }
-                jobs.add(JSONObject().put("id", id).put("url", selected.getString("url")).put("mode", "audio").put("quality", "best")
-                    .put("audioFormat", audioFormat).put("audioQuality", if (audioFormat == "mp3") 320 else 0)
-                    .put("title", "$artistText — ${row.getString("name")}").put("spotifyTitle", row.getString("name"))
-                    .put("spotifyArtists", artistText).put("spotifyTrackUri", row.getString("uri")).put("spotifyPlaylist", playlist.optString("title"))
-                    .put("thumbnail",row.optString("thumbnail")).put("duration",row.optDouble("duration")).put("spotifyAlbum",row.optString("album"))
-                    .put("sourceUrl", "https://open.spotify.com/track/${row.getString("uri").substringAfterLast(':')}")
-                    .put("extractorRoute", ExtractorRoutes.DEFAULT).put("type", "media").put("state", "queued").put("progress", 0)
-                    .put("message", "Waiting to download matched audio").put("createdAt", System.currentTimeMillis()))
-                assigned[key] = id
-            }
+            val (jobs, assigned) = SpotifyDownloads.queue(this@MainActivity,
+                (0 until tracks.length()).map { tracks.getJSONObject(it) }.filter { it.optString("key") in chosen }, audioFormat, playlist.optString("title"))
             if (assigned.isEmpty()) { error("Find matches and confirm uncertain ones before downloading."); return }
-            DownloadStore.addAll(this@MainActivity, jobs)
             PlaylistStore.update(this@MainActivity) { state ->
                 val stored = state.getJSONArray("tracks")
                 for (i in 0 until stored.length()) assigned[stored.getJSONObject(i).optString("key")]?.let { stored.getJSONObject(i).put("jobId", it) }
             }
             startJobs(jobs.map { it.getString("id") })
             send("spotifyQueued", JSONObject().put("count", jobs.size).put("existing", assigned.size - jobs.size).put("format", audioFormat))
+        }
+
+        @JavascriptInterface fun downloadSpotifySong(rawUrl: String, matchUrl: String, audioFormat: String, confirmed: Boolean) {
+            val track = previewSpotifyTrack?.let { JSONObject(it.toString()) } ?: return
+            if (rawUrl != previewUrl || audioFormat !in listOf("original", "mp3")) return
+            track.put("selectedUrl", matchUrl).put("confirmed", confirmed)
+            val result = SpotifyDownloads.queue(this@MainActivity, listOf(track), audioFormat)
+            if (result.assigned.isEmpty()) { error("Choose and confirm an audio match before downloading."); return }
+            startJobs(result.jobs.map { it.getString("id") })
+            send("spotifyQueued", JSONObject().put("count", result.jobs.size).put("existing", result.assigned.size - result.jobs.size).put("format", audioFormat))
+            if (result.jobs.isEmpty() && shareOnly) runOnUiThread { Toast.makeText(this@MainActivity, "Song already saved or queued in Quartz", Toast.LENGTH_SHORT).show(); finish() }
         }
 
         @JavascriptInterface fun retrySpotifyDownload(id: String) {

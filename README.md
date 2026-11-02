@@ -18,6 +18,7 @@ Get the signed APK from [the latest release](https://github.com/happyachraf/quar
 - Facebook shares load through that saved browser session first and read the embedded video's stream data, including shared posts and separate HD video/audio streams. Formats are offered without a manual browser visit. Facebook can still require sign-in or decline access to a post.
 - Download queue with 1, 2 or 3 simultaneous downloads (2 by default), individual foreground notifications, Pause/Resume and retained compatible partial downloads.
 - Public Spotify playlist metadata, two concurrent YouTube match searches, reusable seven-day search results across playlists, independent saved workspaces and audio downloads from reviewed matches.
+- Share or paste a single Spotify song to open audio options with its cover and YouTube matches. Choose Original audio or MP3 at 320 kbps; uncertain matches require selection before download. Song sharing does not import a playlist or change its saved workspace.
 - Original source audio or 320 kbps MP3, with artwork and music tags when available.
 - YouTube lookups start during shared-link loading and recover HD after low-resolution-only responses. Each separate lookup gets fresh formats; its selected download can use those formats without a second extraction.
 - Music library, player, playlist groups, long-press selection, Select all and bulk removal.

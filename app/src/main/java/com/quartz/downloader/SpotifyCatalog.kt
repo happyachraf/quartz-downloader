@@ -12,7 +12,7 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import java.io.ByteArrayOutputStream
 
-/** Reads public playlist metadata through the same guest session used by Spotify's web player. */
+/** Reads public Spotify metadata. Audio is obtained separately from a reviewed YouTube match. */
 object SpotifyCatalog {
     private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     private data class Session(val token: String, val client: String, val version: String, val hash: String, val expires: Long)
@@ -20,10 +20,31 @@ object SpotifyCatalog {
 
     fun normalize(raw: String): String {
         val uri = android.net.Uri.parse(UrlPolicy.normalize(raw))
-        require(uri.host == "open.spotify.com") { "Paste a Spotify playlist link." }
-        val id = Regex("^/(?:intl-[a-z]{2}/)?playlist/([A-Za-z0-9]{22})/?$").find(uri.path.orEmpty())?.groupValues?.get(1)
-            ?: throw IllegalArgumentException("This section accepts Spotify playlist links.")
-        return "https://open.spotify.com/playlist/$id"
+        require(uri.host.equals("open.spotify.com", true)) { "Paste a Spotify song or playlist link." }
+        val match = Regex("^/(?:intl-[a-z]{2}/)?(playlist|track)/([A-Za-z0-9]{22})/?$").find(uri.path.orEmpty())
+            ?: throw IllegalArgumentException("Paste a Spotify song or playlist link.")
+        return "https://open.spotify.com/${match.groupValues[1]}/${match.groupValues[2]}"
+    }
+
+    fun isTrack(url: String): Boolean = android.net.Uri.parse(url).path.orEmpty().matches(Regex("/(?:intl-[a-z]{2}/)?track/[A-Za-z0-9]{22}/?"))
+
+    /** The public embed provides song metadata without a guest token or playlist import. */
+    fun loadTrack(raw: String): JSONObject {
+        val url = normalize(raw)
+        require(isTrack(url)) { "Paste a Spotify song link." }
+        val id = url.substringAfterLast('/')
+        val html = http("https://open.spotify.com/embed/track/$id")
+        val entity = JSONObject(script(html, "__NEXT_DATA__")).getJSONObject("props").getJSONObject("pageProps")
+            .getJSONObject("state").getJSONObject("data").getJSONObject("entity")
+        require(entity.optString("uri") == "spotify:track:$id" && entity.optString("name").isNotBlank()) { "This Spotify song is unavailable." }
+        val artists = entity.optJSONArray("artists") ?: JSONArray()
+        val names = (0 until artists.length()).mapNotNull { artists.optJSONObject(it)?.optString("name")?.takeIf(String::isNotBlank) }
+        require(names.isNotEmpty() && entity.optLong("duration") > 0) { "Spotify did not reveal this song's details." }
+        val images = entity.optJSONObject("visualIdentity")?.optJSONArray("image") ?: JSONArray()
+        val cover = (0 until images.length()).mapNotNull { images.optJSONObject(it) }.maxByOrNull { it.optInt("maxWidth") }?.optString("url").orEmpty()
+        return JSONObject().put("key", id).put("uri", "spotify:track:$id").put("name", entity.getString("name"))
+            .put("artists", JSONArray(names)).put("duration", entity.getLong("duration") / 1000.0)
+            .put("thumbnail", cover).put("album", entity.optString("albumName")).put("status", "pending").put("candidates", JSONArray())
     }
 
     private fun http(url: String, body: JSONObject? = null, headers: Map<String, String> = emptyMap()): String {
@@ -122,6 +143,7 @@ object SpotifyCatalog {
 
     fun load(raw: String): JSONObject {
         val url = normalize(raw)
+        require(!isTrack(url)) { "Share this song to open its audio download options." }
         val id = url.substringAfterLast('/')
         val html = http(url)
         var access = guest(html)

@@ -1,6 +1,6 @@
 (() => {
   const sheet = $('download-sheet'), content = $('download-sheet-content'), confirm = $('download-sheet-confirm');
-  let data = null, selected = 'video:best', expanded = false, popup = false;
+  let data = null, selected = 'video:best', expanded = false, popup = false, selectedMatch = '', confirmedMatch = false;
   const isShare = () => document.body.classList.contains('share-only');
   const setConfirm=label=>{const mark=document.createElement('img');mark.className='ui-icon';mark.src='icons/download-outline.svg';mark.alt='';confirm.replaceChildren(mark,document.createTextNode(label));};
   const size = bytes => bytes > 0 ? '≈ ' + (bytes / 1000000).toFixed(1) + ' MB' : '';
@@ -18,7 +18,10 @@
     popup = true; data = null; expanded = false;
     content.replaceChildren();
     const loader = document.createElement('div'); loader.className = 'download-loading';
-    loader.innerHTML = '<span class="download-spinner" aria-hidden="true"></span><strong>Finding your video…</strong><p>Checking available audio and video formats.</p>';
+    const song=/open\.spotify\.com\/(?:intl-[a-z]{2}\/)?track\//i.test(url);
+    loader.innerHTML = song
+      ? '<span class="download-spinner" aria-hidden="true"></span><strong>Finding your song…</strong><p>Loading song details and finding an audio match.</p>'
+      : '<span class="download-spinner" aria-hidden="true"></span><strong>Finding your video…</strong><p>Checking available audio and video formats.</p>';
     const source = document.createElement('small'); source.textContent = sourceName(url); loader.append(source); content.append(loader);
     confirm.disabled = true; setConfirm('Finding formats…');
     $('download-sheet-note').textContent = '';
@@ -26,7 +29,7 @@
   }
   function row(group, id, label, detail, bytes, audio, badge) {
     const button = document.createElement('button'); button.className = 'download-choice';
-    button.setAttribute('role', 'radio'); button.setAttribute('aria-checked', String(selected === id)); button.dataset.option = id;
+    button.setAttribute('role', 'radio'); button.setAttribute('aria-checked', String(id.startsWith('match:') ? selectedMatch === id.slice(6) : selected === id)); button.dataset.option = id;
     const text = document.createElement('span'); text.className = 'download-choice-text';
     const title = document.createElement('strong'); title.textContent = label; text.append(title);
     if (detail) { const sub = document.createElement('small'); sub.textContent = detail; text.append(sub); }
@@ -35,7 +38,7 @@
     if (bytes > 0) { const estimate = document.createElement('small'); estimate.textContent = size(bytes); end.append(estimate); }
     const radio = document.createElement('span'); radio.className = 'download-radio'; radio.setAttribute('aria-hidden', 'true');
     button.append(radio, text, end);
-    button.onclick = () => { selected = id; render(); [...content.querySelectorAll('[data-option]')].find(x => x.dataset.option === id)?.focus({preventScroll:true}); };
+    button.onclick = () => { if(id.startsWith('match:')){selectedMatch=id.slice(6);confirmedMatch=true;}else selected = id; render(); [...content.querySelectorAll('[data-option]')].find(x => x.dataset.option === id)?.focus({preventScroll:true}); };
     button.onkeydown = event => {
       if (!['ArrowDown','ArrowUp','ArrowLeft','ArrowRight'].includes(event.key)) return;
       event.preventDefault(); const buttons = [...content.querySelectorAll('[data-option]')];
@@ -54,8 +57,13 @@
     const media = document.createElement('div'); media.className = 'download-media';
     if (/^https:\/\//.test(data.thumbnail)) { const thumb = document.createElement('img'); thumb.src = data.thumbnail; thumb.alt = ''; media.append(thumb); }
     const info = document.createElement('div'), title = document.createElement('strong'), source = document.createElement('small');
-    title.textContent = data.title; source.textContent = sourceName(data.url) + (data.duration > 0 ? ' · ' + Math.floor(data.duration/60) + ':' + String(Math.floor(data.duration)%60).padStart(2,'0') : '');
+    title.textContent = data.title; source.textContent = (data.artist ? data.artist+' · ' : '') + sourceName(data.url) + (data.duration > 0 ? ' · ' + Math.floor(data.duration/60) + ':' + String(Math.floor(data.duration)%60).padStart(2,'0') : '');
+    media.classList.toggle('spotify-song-media',!!data.spotifyTrack);
     info.append(title, source); media.append(info); content.append(media);
+    if(data.spotifyTrack){
+      const matches=section('Audio match');
+      for(const candidate of data.matches||[])row(matches,'match:'+candidate.url,candidate.title,(candidate.channel||'YouTube')+' · '+(candidate.score>=.82&&candidate.duration>0?'Strong match':'Choose to confirm this version'),0,false);
+    }
     if(data.hasAudio!==false){const audio = section('Audio');
     row(audio, 'audio:original', 'Original audio', 'Best source quality', 0, true, 'BEST');
     row(audio, 'audio:mp3', 'MP3 · 320 kbps', 'Compatible with most players', 0, true);}
@@ -74,8 +82,8 @@
       more.setAttribute('aria-expanded',String(expanded)); more.onclick=()=>{expanded=!expanded;render();};content.append(more);
     }
     }
-    $('download-sheet-note').textContent = 'Sizes marked ≈ are estimates.';
-    confirm.disabled = false; setConfirm(selected.startsWith('audio:') ? 'Download audio' : 'Download video');
+    $('download-sheet-note').textContent = data.spotifyTrack ? (selectedMatch ? 'Audio comes from the YouTube match shown above. Spotify cover and song tags are included when available.' : 'Choose the correct audio match to continue.') : 'Sizes marked ≈ are estimates.';
+    confirm.disabled = !!data.spotifyTrack&&!selectedMatch; setConfirm(data.spotifyTrack?'Download song':selected.startsWith('audio:') ? 'Download audio' : 'Download video');
     content.scrollTop = scroll;
   }
   window.DownloadSheet = {
@@ -91,7 +99,9 @@
     },
     preview(value) {
       data = value; expanded = false;
+      selectedMatch = value.selectedMatch || ''; confirmedMatch = false;
       selected = data.hasAudio===false?'video:best':(data.hasVideo===false||preferences.defaultMode === 'audio') ? 'audio:'+($('audio-format').value||'original') : 'video:best';
+      if(data.spotifyTrack)selected='audio:'+(preferences.spotifyAudioFormat||'original');
       if (!popup) return false;
       render(); show(); return true;
     },
@@ -99,11 +109,12 @@
       if (!sheet.open) return;
       data = null; content.replaceChildren();
       const box = document.createElement('div'); box.className = 'download-loading';
-      const title = document.createElement('strong'); title.textContent = value.signIn==='facebook'?'Facebook sign-in needed':'Could not load this video';
+      const song=/open\.spotify\.com\/(?:intl-[a-z]{2}\/)?track\//i.test($('link').value);
+      const title = document.createElement('strong'); title.textContent = value.signIn==='facebook'?'Facebook sign-in needed':song?'Could not load this song':'Could not load this video';
       const message = document.createElement('p'); message.textContent = value.message; box.append(title,message);
       const retry = document.createElement('button'); retry.className = 'secondary'; retry.textContent = 'Try again'; retry.onclick=()=>{loading($('link').value);inspect();}; box.append(retry);
       const facebook=/^https:\/\/(?:[^/]+\.)?facebook\.com\/|^https:\/\/fb\.watch\//i.test($('link').value);
-      if(value.signIn || !facebook){const browser = document.createElement('button'); browser.className = 'secondary'; browser.textContent = value.signIn === 'x' ? 'Sign in to X' : value.signIn==='facebook'?'Sign in to Facebook':'Open in Quartz browser';
+      if(value.signIn || (!facebook&&!song)){const browser = document.createElement('button'); browser.className = 'secondary'; browser.textContent = value.signIn === 'x' ? 'Sign in to X' : value.signIn==='facebook'?'Sign in to Facebook':'Open in Quartz browser';
       browser.onclick=()=>value.signIn?native('signIn',value.signIn):native('browser',$('link').value);box.append(browser);}content.append(box);
       confirm.disabled=true;setConfirm('Choose a format to download');$('download-sheet-note').textContent='';
     },
@@ -113,7 +124,8 @@
     if(!data||confirm.disabled)return;
     confirm.disabled=true;setConfirm('Adding download…');
     const [kind,choice]=selected.split(':');
-    native('download',data.url,kind==='video'?choice:'best',kind,kind==='audio'?choice:'original');
+    if(data.spotifyTrack)native('downloadSpotifySong',data.url,selectedMatch,choice,confirmedMatch);
+    else native('download',data.url,kind==='video'?choice:'best',kind,kind==='audio'?choice:'original');
     if(!isShare()){close();notice('Added to downloads.');}
   };
   $('download-sheet-close').onclick=close;

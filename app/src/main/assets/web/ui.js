@@ -24,10 +24,11 @@ function notice(message, signIn) {
 function site(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return 'Video'; }
 }
-function sourceName(url){const host=site(url).toLowerCase();for(const [domain,name] of [['youtube.com','YouTube'],['youtu.be','YouTube'],['tiktok.com','TikTok'],['x.com','X'],['twitter.com','X'],['facebook.com','Facebook'],['fb.watch','Facebook'],['instagram.com','Instagram'],['soundcloud.com','SoundCloud']])if(host===domain||host.endsWith('.'+domain))return name;return host;}
+function sourceName(url){const host=site(url).toLowerCase();for(const [domain,name] of [['youtube.com','YouTube'],['youtu.be','YouTube'],['tiktok.com','TikTok'],['x.com','X'],['twitter.com','X'],['facebook.com','Facebook'],['fb.watch','Facebook'],['instagram.com','Instagram'],['soundcloud.com','SoundCloud'],['open.spotify.com','Spotify']])if(host===domain||host.endsWith('.'+domain))return name;return host;}
 function inspect(openOptions=preferences.askQuality) {
   const url = $('link').value.trim();
   if (!url) { notice('Paste a video link first.'); return; }
+  if (/open\.spotify\.com\/(?:intl-[a-z]{2}\/)?track\//i.test(url)) openOptions = true;
   current = '';
   window.AppUI?.navigate('downloads');
   if (/open\.spotify\.com\//.test(url)) window.AppUI?.navigate('spotify');
@@ -144,7 +145,7 @@ function updateSettings(state) {
   document.body.classList.toggle('share-only', !!state.shareOnly);
   document.documentElement.classList.toggle('share-only', !!state.shareOnly);
   $('audio-format').value = state.videoAudioFormat || 'original';
-  preferences = {theme: state.theme || 'dark', defaultMode: state.defaultMode || 'video', askQuality: !!state.askQuality};
+  preferences = {theme: state.theme || 'dark', defaultMode: state.defaultMode || 'video', askQuality: !!state.askQuality, spotifyAudioFormat: state.spotifyAudioFormat || 'original'};
   document.body.classList.toggle('light', preferences.theme === 'light');
   for (const theme of ['dark', 'light']) $('theme-' + theme).setAttribute('aria-pressed', String(theme === preferences.theme));
   for (const value of ['video', 'audio']) $('default-' + value).setAttribute('aria-pressed', String(value === preferences.defaultMode));

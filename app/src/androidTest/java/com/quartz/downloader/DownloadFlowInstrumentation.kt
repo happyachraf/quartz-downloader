@@ -30,6 +30,7 @@ class DownloadFlowInstrumentation : Instrumentation() {
         evidence = File(targetContext.getExternalFilesDir(null), "tests-030").apply { mkdirs() }
         try {
             when (phase) {
+                "spotify-song" -> spotifySong()
                 "youtube-quality" -> youtubeQuality()
                 "youtube-speed" -> youtubeSpeed()
                 "parallel-downloads" -> parallelDownloads()
@@ -70,6 +71,78 @@ class DownloadFlowInstrumentation : Instrumentation() {
         }
     }
     private fun check(name: String, condition: Boolean) { if (!condition) error(name); checks.put(name) }
+    private fun spotifySong() {
+        val url = "https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b"
+        check("Localized Spotify song share normalizes without tracking parameters", SpotifyCatalog.normalize("https://open.spotify.com/intl-fr/track/0VjIjW4GlUZAMYd2vXMi3b?si=share") == url)
+        check("Playlist normalization still works", SpotifyCatalog.normalize("https://open.spotify.com/playlist/62ppawlNpdv2tRMzJj01NV?si=share") == "https://open.spotify.com/playlist/62ppawlNpdv2tRMzJj01NV")
+        check("Album links are rejected with a song or playlist hint", runCatching { SpotifyCatalog.normalize("https://open.spotify.com/album/0VjIjW4GlUZAMYd2vXMi3b") }.exceptionOrNull()?.message?.contains("song or playlist") == true)
+        check("Lookalike Spotify hosts are rejected", runCatching { SpotifyCatalog.normalize("https://open.spotify.com.example.org/track/0VjIjW4GlUZAMYd2vXMi3b") }.isFailure)
+        val library = File(targetContext.filesDir, "spotify-library.json").let { if (it.exists()) it.readText() else "" }
+        val ids = mutableListOf<String>()
+        fun previewTrack() = MainActivity::class.java.getDeclaredField("previewSpotifyTrack").apply { isAccessible = true }.get(activity) as JSONObject
+        try {
+            for (format in listOf("original", "mp3")) {
+                val old = DownloadStore.all(targetContext).let { rows -> (0 until rows.length()).map { rows.getJSONObject(it).getString("id") }.toSet() }
+                launch(if (format == "original") "$url?si=android-share" else url)
+                waitUntil(180) { js("!!document.querySelector('[data-option^=\"match:\"]')") == "true" }
+                if (js("document.getElementById('download-sheet-confirm').disabled") == "true") js("document.querySelector('[data-option^=\"match:\"]').click()")
+                ready()
+                check("$format song share stays in the transparent options sheet", activity is ShareActivity && js("document.getElementById('download-sheet').open") == "true")
+                check("$format song title and artist are shown", js("document.querySelector('.download-media').textContent.includes('Blinding Lights')&&document.querySelector('.download-media').textContent.includes('The Weeknd')") == "true")
+                check("$format offers both audio formats without video choices", js("!!document.querySelector('[data-option=\"audio:original\"]')&&!!document.querySelector('[data-option=\"audio:mp3\"]')&&!document.querySelector('[data-option^=\"video:\"]')") == "true")
+                val track = previewTrack()
+                check("$format keeps the Spotify song URI and largest cover", track.optString("uri") == "spotify:track:0VjIjW4GlUZAMYd2vXMi3b" && track.optString("thumbnail").contains("ab67616d0000b273"))
+                check("$format finds a real YouTube match", track.getJSONArray("candidates").getJSONObject(0).getString("url").startsWith("https://www.youtube.com/watch?v="))
+                js("document.querySelector('[data-option=\"audio:$format\"]').click()")
+                val chosenMatch = js("document.querySelector('[data-option^=\"match:\"][aria-checked=\"true\"]').dataset.option.slice(6)")
+                track.put("selectedUrl", org.json.JSONTokener(chosenMatch).nextValue().toString()).put("confirmed", true)
+                screenshot("spotify-song-$format-options")
+                js("document.getElementById('download-sheet-confirm').click()")
+                var id = ""
+                waitUntil(20) { val rows = DownloadStore.all(targetContext); id = (0 until rows.length()).map { rows.getJSONObject(it) }.firstOrNull { it.optString("id") !in old && it.optString("sourceUrl") == url }?.optString("id").orEmpty(); id.isNotBlank() }
+                ids.add(id)
+                waitUntil(360) { DownloadStore.get(targetContext, id)?.optString("state") in listOf("complete", "failed") }
+                val job = DownloadStore.get(targetContext, id)!!
+                save("spotify-song-$format-job.json", job)
+                check("$format shared song finishes through DownloadService", job.optString("state") == "complete")
+                check("$format saved song has Spotify tags without a playlist", job.optString("spotifyTitle") == "Blinding Lights" && job.optString("spotifyArtists") == "The Weeknd" && job.optString("spotifyPlaylist").isBlank())
+                val metadata = android.media.MediaMetadataRetriever()
+                try {
+                    metadata.setDataSource(targetContext, android.net.Uri.parse(job.getString("uri")))
+                    check("$format saved audio has full song duration", metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong() in 185000..220000)
+                    check("$format has encoded audio and embedded artwork", metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) == "yes" && metadata.embeddedPicture != null)
+                    check("$format embeds the Spotify title and artist", metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_TITLE) == "Blinding Lights" && metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ARTIST) == "The Weeknd")
+                    if (format == "mp3") check("MP3 is exported at 320 kbps", metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_BITRATE)!!.toInt() in 310000..340000 && job.getString("filename").endsWith(".mp3"))
+                } finally { metadata.release() }
+                targetContext.contentResolver.openInputStream(android.net.Uri.parse(job.getString("uri")))!!.use { input -> File(evidence, "spotify-song-$format.${job.getString("filename").substringAfterLast('.')}").outputStream().use { input.copyTo(it) } }
+                val duplicate = SpotifyDownloads.queue(targetContext, listOf(track), format)
+                check("$format duplicate song is linked to the existing download", duplicate.jobs.isEmpty() && duplicate.assigned.values.single() == id)
+            }
+            check("Single song shares preserve all saved playlist workspaces", File(targetContext.filesDir, "spotify-library.json").let { if (it.exists()) it.readText() else "" } == library)
+            launch("https://open.spotify.com/intl-fr/track/7qiZfU4dY1lWllzX7mPBI3?si=android-share", false)
+            waitUntil(180) { js("!!document.querySelector('[data-option^=\"match:\"]')") == "true" }
+            check("Another localized song opens audio options when pasted", js("document.getElementById('download-sheet').open&&document.querySelector('.download-media').textContent.includes('Shape of You')") == "true")
+            check("Second song retains its own Spotify identity", previewTrack().optString("uri") == "spotify:track:7qiZfU4dY1lWllzX7mPBI3")
+            screenshot("spotify-song-second-options")
+            val uncertain = JSONObject().put("url", url).put("title", "Review check").put("spotifyTrack", true).put("hasAudio", true).put("hasVideo", false)
+                .put("matches", JSONArray().put(JSONObject().put("url", "https://www.youtube.com/watch?v=abcdefghijk").put("title", "Uncertain version").put("score", .6).put("duration", 200)))
+            js("DownloadSheet.shared(${JSONObject.quote(url)});DownloadSheet.preview($uncertain)")
+            check("Uncertain song match blocks download until reviewed", js("document.getElementById('download-sheet-confirm').disabled") == "true")
+            js("document.querySelector('[data-option^=\"match:\"]').click()")
+            check("Explicit match selection enables the song download", js("!document.getElementById('download-sheet-confirm').disabled") == "true")
+            val unsafe = previewTrack().put("selectedUrl", "https://www.youtube.com/watch?v=not-in-list").put("confirmed", true)
+            check("Native queue rejects a match outside the offered candidates", SpotifyDownloads.queue(targetContext, listOf(unsafe), "original").assigned.isEmpty())
+            js("Quartz.back()")
+            launch("https://open.spotify.com/track/0000000000000000000000")
+            waitUntil(90) { js("document.getElementById('download-sheet-content').textContent.includes('Could not load this song')") == "true" }
+            check("Unavailable song shows a retry with download disabled", js("document.getElementById('download-sheet-confirm').disabled&&document.getElementById('download-sheet-content').textContent.includes('Try again')") == "true")
+        } finally {
+            for (id in ids) {
+                DownloadStore.get(targetContext, id)?.optString("uri")?.takeIf { it.isNotBlank() }?.let { targetContext.contentResolver.delete(android.net.Uri.parse(it), null, null) }
+                DownloadStore.remove(targetContext, id); DownloadNotifications.dismiss(targetContext, id); File(targetContext.filesDir, "covers/$id.jpg").delete()
+            }
+        }
+    }
     private fun youtubeSpeed() {
         launch("", false)
         val timings = JSONArray()
